@@ -457,13 +457,14 @@ async fn list_models(State(state): State<ProxyState>) -> impl IntoResponse {
 }
 
 /// Handler for OpenAI Responses API (/v1/responses).
-/// Translates `input` field to `messages` and delegates to chat_completions.
+/// Translates `input` field to `messages`, forwards to upstream, and
+/// transforms the response to Responses API format.
 async fn responses(
     State(state): State<ProxyState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: String,
 ) -> Result<impl IntoResponse> {
-    // Remap "input" -> "messages" if present
+    // Remap "input" -> "messages"
     let mut body_json: Value =
         serde_json::from_str(&body).map_err(|e| ProxyError::InvalidRequest(e.to_string()))?;
 
@@ -478,7 +479,114 @@ async fn responses(
     let remapped =
         serde_json::to_string(&body_json).map_err(|e| ProxyError::InvalidRequest(e.to_string()))?;
 
-    chat_completions(State(state), headers, remapped).await
+    // Look up provider (same as chat_completions)
+    let model = body_json
+        .get("model")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| ProxyError::InvalidRequest("missing 'model' field".into()))?;
+
+    let provider = {
+        let owner = state
+            .models
+            .get(model)
+            .ok_or_else(|| ProxyError::UnknownModel(model.to_string()))?;
+        state
+            .config
+            .providers
+            .iter()
+            .find(|p| &p.name == owner)
+            .ok_or_else(|| ProxyError::UnknownModel(model.to_string()))?
+    };
+
+    // Forward to upstream
+    let upstream_response = state
+        .client
+        .post(provider.chat_url())
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", provider.api_key),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(remapped)
+        .send()
+        .await
+        .map_err(|e| ProxyError::UpstreamError(e.to_string()))?;
+
+    let status = upstream_response.status();
+    let body_bytes = upstream_response
+        .bytes()
+        .await
+        .map_err(|e| ProxyError::UpstreamError(e.to_string()))?;
+
+    if !status.is_success() {
+        // Pass through error responses unchanged
+        let mut response = axum::response::Response::builder().status(status);
+        response = response.header(header::CONTENT_TYPE, "application/json");
+        return Ok(response.body(Body::from(body_bytes.to_vec())).unwrap());
+    }
+
+    // Transform Chat Completions response -> Responses API format
+    let upstream_json: Value =
+        serde_json::from_slice(&body_bytes).map_err(|e| ProxyError::Internal(e.to_string()))?;
+
+    let transformed = transform_to_responses(upstream_json);
+
+    let resp_body =
+        serde_json::to_string(&transformed).map_err(|e| ProxyError::Internal(e.to_string()))?;
+
+    let response = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json");
+    Ok(response.body(Body::from(resp_body)).unwrap())
+}
+
+/// Convert Chat Completions response JSON to Responses API format.
+fn transform_to_responses(mut json: Value) -> Value {
+    let obj = json.as_object_mut().unwrap();
+
+    // object type
+    obj.insert("object".into(), Value::String("response".into()));
+
+    // choices -> output
+    if let Some(choices) = obj.remove("choices") {
+        let output: Vec<Value> = choices
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|choice| {
+                let msg = choice.get("message").cloned().unwrap_or_default();
+                let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                serde_json::json!({
+                    "type": "message",
+                    "role": msg.get("role").and_then(|r| r.as_str()).unwrap_or("assistant"),
+                    "content": [{
+                        "type": "output_text",
+                        "text": content
+                    }]
+                })
+            })
+            .collect();
+        obj.insert("output".into(), Value::Array(output));
+    }
+
+    // usage: prompt_tokens -> input_tokens, completion_tokens -> output_tokens
+    if let Some(usage) = obj.get_mut("usage")
+        && let Some(u) = usage.as_object_mut()
+    {
+        if let Some(pt) = u.remove("prompt_tokens") {
+            u.insert("input_tokens".into(), pt);
+        }
+        if let Some(ct) = u.remove("completion_tokens") {
+            u.insert("output_tokens".into(), ct);
+        }
+        // Keep total_tokens as-is
+    }
+
+    // Remove chat-completion-specific fields
+    obj.remove("system_fingerprint");
+    obj.remove("logprobs");
+
+    json
 }
 
 async fn chat_completions(

@@ -13,7 +13,13 @@ if [ ! -f /var/lib/proxai/keys.json ]; then
     chmod 600 /var/lib/proxai/keys.json
 fi
 
-# Config file permissions (conffile — dpkg handles upgrade prompts)
+# Config directory
+mkdir -p /etc/proxai
+
+# Copy config from example only on first install
+if [ ! -f /etc/proxai/config.toml ]; then
+    cp /usr/share/doc/proxai/config.example.toml /etc/proxai/config.toml
+fi
 chmod 640 /etc/proxai/config.toml
 chown root:proxai /etc/proxai/config.toml
 
@@ -22,7 +28,7 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi
 
-# Only show instructions on first install
+# Show instructions only on first install (not upgrade)
 if [ "$1" = "configure" ] && [ -z "$2" ]; then
     echo
     echo "=== ProxAI installed ==="

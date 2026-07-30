@@ -12,6 +12,7 @@ pub const DEFAULT_SOCKET: &str = "/tmp/proxai.sock";
 pub enum AdminRequest {
     GenerateKey { name: String },
     ListKeys,
+    RevokeKey { target: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub struct GenerateKeyResponse {
 pub enum AdminResponse {
     KeyGenerated(GenerateKeyResponse),
     KeyList(Vec<KeyInfo>),
+    KeyRevoked { id: u64, name: String },
     Error(String),
 }
 
@@ -126,6 +128,11 @@ fn process_request(request: AdminRequest, km: &KeyManager) -> AdminResponse {
         },
         AdminRequest::ListKeys => match km.list() {
             Ok(keys) => AdminResponse::KeyList(keys),
+            Err(e) => AdminResponse::Error(e),
+        },
+        AdminRequest::RevokeKey { target } => match km.revoke(&target) {
+            Ok(Some((id, name))) => AdminResponse::KeyRevoked { id, name },
+            Ok(None) => AdminResponse::Error(format!("key not found: {target}")),
             Err(e) => AdminResponse::Error(e),
         },
     }

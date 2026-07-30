@@ -128,6 +128,35 @@ impl KeyManager {
         Ok(full_key)
     }
 
+    /// Revoke a key by name or id. Returns the revoked key's id and name,
+    /// or None if no matching key was found.
+    pub fn revoke(&self, target: &str) -> Result<Option<(u64, String)>, String> {
+        let mut store = self.load_or_init()?;
+
+        // Find key by name or id
+        let pos = store
+            .keys
+            .iter()
+            .position(|k| k.name == target || k.id.to_string() == target);
+
+        let removed = match pos {
+            Some(idx) => {
+                let entry = store.keys.remove(idx);
+                (entry.id, entry.name.clone(), entry.hash.clone())
+            }
+            None => return Ok(None),
+        };
+
+        // Persist to disk
+        self.save(&store)?;
+
+        // Remove from in-memory cache
+        let mut cache = self.cache.lock().unwrap();
+        cache.remove(&removed.2);
+
+        Ok(Some((removed.0, removed.1)))
+    }
+
     /// List all keys (from cache — fast, no I/O).
     pub fn list(&self) -> Result<Vec<KeyInfo>, String> {
         let mut cache = self.cache.lock().unwrap();

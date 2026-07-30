@@ -82,8 +82,19 @@ async fn main() -> Result<()> {
                     cli_generate_key(&socket_path, &name).await
                 }
                 Some("list-keys") => cli_list_keys(&socket_path).await,
+                Some("revoke-key") => {
+                    let target = find_positional(&args, 2, &["--socket", "revoke-key"])
+                        .ok_or_else(|| {
+                            ProxyError::InvalidRequest(
+                                "usage: proxai cli --socket <path> revoke-key <name-or-id>".into(),
+                            )
+                        })?;
+                    cli_revoke_key(&socket_path, &target).await
+                }
                 _ => {
-                    eprintln!("usage: proxai cli --socket <path> <generate-key|list-keys> [name]");
+                    eprintln!(
+                        "usage: proxai cli --socket <path> <generate-key|list-keys|revoke-key> [arg]"
+                    );
                     Ok(())
                 }
             }
@@ -188,6 +199,7 @@ fn print_usage() {
     println!("Client (talks to server via Unix socket):");
     println!("  proxai cli --socket <path> generate-key <name>");
     println!("  proxai cli --socket <path> list-keys");
+    println!("  proxai cli --socket <path> revoke-key <name-or-id>");
     println!();
     println!("Local bootstrap (direct filesystem):");
     println!("  proxai key generate --key <path> <name>");
@@ -231,6 +243,25 @@ async fn cli_list_keys(socket_path: &str) -> Result<()> {
             } else {
                 print_key_table(&keys);
             }
+        }
+        admin::AdminResponse::Error(e) => eprintln!("Server error: {e}"),
+        _ => eprintln!("Unexpected response"),
+    }
+    Ok(())
+}
+
+async fn cli_revoke_key(socket_path: &str, target: &str) -> Result<()> {
+    let response = send_admin_request(
+        socket_path,
+        &admin::AdminRequest::RevokeKey {
+            target: target.to_string(),
+        },
+    )
+    .await?;
+
+    match response {
+        admin::AdminResponse::KeyRevoked { id, name } => {
+            println!("Key revoked: #{id} {name}");
         }
         admin::AdminResponse::Error(e) => eprintln!("Server error: {e}"),
         _ => eprintln!("Unexpected response"),

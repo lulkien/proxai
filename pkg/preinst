@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+if ! getent passwd proxai >/dev/null 2>&1; then
+    useradd --system \
+        --no-create-home \
+        --home-dir /var/lib/proxai \
+        --shell /usr/sbin/nologin \
+        --comment "ProxAI proxy daemon" \
+        proxai
+fi
+
+exit 0

@@ -1,0 +1,13 @@
+bind = "127.0.0.1:3000"
+
+# Add providers here. Example:
+#
+# [[providers]]
+# name = "deepseek"
+# url = "https://api.deepseek.com/v1"
+# api_key = "sk-your-key-here"
+#
+# [[providers]]
+# name = "kimi"
+# url = "https://api.moonshot.cn/v1"
+# api_key = "sk-your-key-here"

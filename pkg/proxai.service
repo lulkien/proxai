@@ -1,0 +1,25 @@
+[Unit]
+Description=ProxAI - OpenAI-compatible API proxy
+Documentation=https://github.com/lulkien/proxai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proxai
+Group=proxai
+ExecStart=/usr/bin/proxai serve \
+    --config /etc/proxai/config.toml \
+    --key /var/lib/proxai/keys.json \
+    --socket /var/run/proxai/admin.sock
+RuntimeDirectory=proxai
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/proxai /var/run/proxai
+ReadOnlyPaths=/etc/proxai
+
+[Install]
+WantedBy=multi-user.target

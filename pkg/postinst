@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+# Fix ownership
+chown -R proxai:proxai /var/lib/proxai
+chmod 750 /var/lib/proxai
+chmod 600 /var/lib/proxai/keys.json
+
+# Config
+chmod 640 /etc/proxai/config.toml
+chown root:proxai /etc/proxai/config.toml
+
+# Reload systemd (service is not auto-enabled)
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+
+echo
+echo "=== ProxAI installed ==="
+echo
+echo "1. Edit /etc/proxai/config.toml and add your provider API keys."
+echo "2. Generate an API key for clients:"
+echo "     sudo -u proxai proxai key generate --key /var/lib/proxai/keys.json <name>"
+echo "   or start the server and use the admin socket:"
+echo "     sudo systemctl start proxai"
+echo "     proxai cli --socket /var/run/proxai/admin.sock generate-key <name>"
+echo "3. Enable the service to start on boot:"
+echo "     sudo systemctl enable proxai"
+echo
+
+exit 0

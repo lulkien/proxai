@@ -1,0 +1,41 @@
+[package]
+name = "proxai"
+version = "0.1.0"
+edition = "2024"
+description = "OpenAI-compatible API proxy with multi-provider routing"
+license = "MIT"
+repository = "https://github.com/lulkien/proxai"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+bincode = "1.3"
+
+[package.metadata.deb]
+maintainer = "ProxAI <proxai@example.com>"
+section = "net"
+priority = "optional"
+depends = "libc6, libgcc-s1"
+extended-description = """\
+ProxAI is an OpenAI-compatible API proxy that routes requests to multiple
+upstream providers (DeepSeek, Kimi, etc.). It supports API key authentication,
+dynamic model discovery, and admin operations over a local Unix socket."""
+
+maintainer-scripts = "pkg"
+assets = [
+    ["pkg/config.toml", "/etc/proxai/config.toml", "644"],
+    ["pkg/keys.json", "/var/lib/proxai/keys.json", "600"],
+    ["pkg/proxai.service", "/lib/systemd/system/proxai.service", "644"],
+    ["target/release/proxai", "/usr/bin/proxai", "755"],
+]

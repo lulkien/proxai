@@ -344,6 +344,7 @@ async fn serve(config_path: &str, key_path: &str, socket_path: &str) -> Result<(
     let app = Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
         .layer(middleware::from_fn_with_state(
             auth::AuthState {
                 key_manager: km.clone(),
@@ -453,6 +454,31 @@ async fn list_models(State(state): State<ProxyState>) -> impl IntoResponse {
     };
 
     (StatusCode::OK, Json(list))
+}
+
+/// Handler for OpenAI Responses API (/v1/responses).
+/// Translates `input` field to `messages` and delegates to chat_completions.
+async fn responses(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<impl IntoResponse> {
+    // Remap "input" -> "messages" if present
+    let mut body_json: Value =
+        serde_json::from_str(&body).map_err(|e| ProxyError::InvalidRequest(e.to_string()))?;
+
+    if let Some(input) = body_json.get("input").cloned() {
+        body_json
+            .as_object_mut()
+            .unwrap()
+            .insert("messages".into(), input);
+        body_json.as_object_mut().unwrap().remove("input");
+    }
+
+    let remapped =
+        serde_json::to_string(&body_json).map_err(|e| ProxyError::InvalidRequest(e.to_string()))?;
+
+    chat_completions(State(state), headers, remapped).await
 }
 
 async fn chat_completions(

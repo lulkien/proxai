@@ -1,10 +1,7 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::{collections::HashMap, path::Path, sync::Mutex, time::Instant};
 
 const KEY_ID_LEN: usize = 4;
 const KEY_STEM_LEN: usize = 32; // raw bytes

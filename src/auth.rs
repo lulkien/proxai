@@ -5,10 +5,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]

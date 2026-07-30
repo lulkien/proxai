@@ -35,13 +35,7 @@ pub async fn cli_list_keys(socket_path: &str) -> Result<()> {
             if keys.is_empty() {
                 println!("No keys.");
             } else {
-                println!("{:<4} {:<20} {:<24} CREATED", "#", "NAME", "KEY");
-                for k in &keys {
-                    println!(
-                        "{:<4} {:<20} {:<24} {}",
-                        k.id, k.name, k.partial, k.created_at
-                    );
-                }
+                crate::cli::key_table(&keys);
             }
         }
         AdminResponse::Error(e) => eprintln!("Server error: {e}"),

@@ -1,8 +1,10 @@
 use crate::key_manager::{KeyInfo, KeyManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixListener,
+};
 use tracing::{error, info};
 
 /// Default admin socket path.

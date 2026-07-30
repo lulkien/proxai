@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod cli;
 mod client;
 mod config;
 mod error;
@@ -7,83 +8,11 @@ mod handlers;
 mod key_manager;
 mod server;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use cli::{Cli, CliAction, Command, KeyAction, key_table};
 use client::{cli_generate_key, cli_list_keys, cli_revoke_key};
 use error::{ProxyError, Result};
 use key_manager::KeyManager;
-
-/// OpenAI-compatible API proxy with multi-provider routing.
-#[derive(Parser)]
-#[command(name = "proxai", version, about)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Start the proxy server
-    Serve {
-        /// Path to TOML config file
-        #[arg(long, default_value = "config.toml")]
-        config: String,
-
-        /// Path to keys.json file
-        #[arg(long, default_value = "keys.json")]
-        key: String,
-
-        /// Path to admin Unix socket
-        #[arg(long, default_value = admin::DEFAULT_SOCKET)]
-        socket: String,
-    },
-
-    /// Client for admin operations over Unix socket
-    Cli {
-        /// Path to admin Unix socket
-        #[arg(long, default_value = admin::DEFAULT_SOCKET)]
-        socket: String,
-
-        #[command(subcommand)]
-        action: CliAction,
-    },
-
-    /// Local key management (direct filesystem, no server needed)
-    Key {
-        /// Path to keys.json file
-        #[arg(long, default_value = "keys.json")]
-        key: String,
-
-        #[command(subcommand)]
-        action: KeyAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum CliAction {
-    /// Generate a new API key
-    GenerateKey {
-        /// Name for the key
-        name: String,
-    },
-    /// List all API keys
-    ListKeys,
-    /// Revoke an API key by name or ID
-    RevokeKey {
-        /// Key name or numeric ID
-        target: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum KeyAction {
-    /// Generate a new API key (writes directly to keys.json)
-    Generate {
-        /// Name for the key
-        name: String,
-    },
-    /// List all keys in keys.json
-    List,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -112,12 +41,12 @@ async fn main() -> Result<()> {
         Some(Command::Key { key, action }) => match action {
             KeyAction::Generate { name } => {
                 let km = KeyManager::new(&key);
-                let key = km.generate(&name).map_err(ProxyError::Internal)?;
+                let key_value = km.generate(&name).map_err(ProxyError::Internal)?;
                 println!("API key generated (save it — shown only once!):");
                 println!();
-                println!("  {key}");
+                println!("  {key_value}");
                 println!();
-                println!("Use: Authorization: Bearer {key}");
+                println!("Use: Authorization: Bearer ***");
                 Ok(())
             }
             KeyAction::List => {
@@ -133,17 +62,6 @@ async fn main() -> Result<()> {
             }
         },
 
-        // Default: start server (backward compat)
         None => server::serve("config.toml", "keys.json", admin::DEFAULT_SOCKET).await,
-    }
-}
-
-fn key_table(keys: &[key_manager::KeyInfo]) {
-    println!("{:<4} {:<20} {:<24} CREATED", "#", "NAME", "KEY");
-    for k in keys {
-        println!(
-            "{:<4} {:<20} {:<24} {}",
-            k.id, k.name, k.partial, k.created_at
-        );
     }
 }

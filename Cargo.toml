@@ -35,7 +35,6 @@ dynamic model discovery, and admin operations over a local Unix socket."""
 maintainer-scripts = "pkg"
 assets = [
     ["pkg/config.toml", "/etc/proxai/config.toml", "644"],
-    ["pkg/keys.json", "/var/lib/proxai/keys.json", "600"],
     ["pkg/proxai.service", "/lib/systemd/system/proxai.service", "644"],
     ["target/release/proxai", "/usr/bin/proxai", "755"],
 ]

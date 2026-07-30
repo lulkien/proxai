@@ -1,23 +1,64 @@
 use crate::key_manager::KeyManager;
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct AuthState {
     pub key_manager: Arc<KeyManager>,
 }
 
-/// Axum middleware that requires a valid API key.
+/// In-memory rate limiter for failed auth attempts per IP.
+#[derive(Clone, Default)]
+struct RateLimiter {
+    attempts: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+}
+
+impl RateLimiter {
+    /// Check if an IP is rate-limited. Returns true if blocked.
+    async fn check(&self, ip: &str) -> bool {
+        let mut map = self.attempts.lock().await;
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(60);
+        let max_failures: usize = 20;
+
+        let entry = map.entry(ip.to_string()).or_default();
+        entry.retain(|t| now.duration_since(*t) < window);
+
+        if entry.len() >= max_failures {
+            return true; // blocked
+        }
+        entry.push(now);
+        false
+    }
+
+    /// Reset rate limit for an IP (called on successful auth).
+    async fn reset(&self, ip: &str) {
+        let mut map = self.attempts.lock().await;
+        map.entry(ip.to_string()).or_default().clear();
+    }
+}
+
+/// Axum middleware that requires a valid API key with rate limiting.
 pub async fn require_api_key(
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let ip = addr.ip().to_string();
+
+    static RATE_LIMITER: std::sync::LazyLock<RateLimiter> =
+        std::sync::LazyLock::new(RateLimiter::default);
+
     let auth_header = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -26,15 +67,39 @@ pub async fn require_api_key(
 
     match auth_header {
         Some(key) => match state.key_manager.validate(key) {
-            Ok(true) => next.run(request).await,
-            Ok(false) => unauthorized("invalid api key"),
+            Ok(true) => {
+                RATE_LIMITER.reset(&ip).await;
+                next.run(request).await
+            }
+            Ok(false) => {
+                if RATE_LIMITER.check(&ip).await {
+                    return rate_limited();
+                }
+                unauthorized("invalid api key")
+            }
             Err(e) => {
                 tracing::error!("Key validation error: {e}");
                 internal_error("key validation failed")
             }
         },
-        None => unauthorized("missing api key"),
+        None => {
+            if RATE_LIMITER.check(&ip).await {
+                return rate_limited();
+            }
+            unauthorized("missing api key")
+        }
     }
+}
+
+fn rate_limited() -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": "rate limited — too many failed attempts, try again later",
+            "type": "rate_limit_error",
+            "code": 429,
+        }
+    });
+    (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response()
 }
 
 fn unauthorized(msg: &str) -> Response {

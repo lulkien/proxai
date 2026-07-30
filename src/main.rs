@@ -1,6 +1,5 @@
 mod admin;
 mod auth;
-mod cli;
 mod client;
 mod config;
 mod error;
@@ -8,10 +7,83 @@ mod handlers;
 mod key_manager;
 mod server;
 
-use cli::{find_positional, parse_flag, print_key_table, print_usage};
+use clap::{Parser, Subcommand};
 use client::{cli_generate_key, cli_list_keys, cli_revoke_key};
 use error::{ProxyError, Result};
 use key_manager::KeyManager;
+
+/// OpenAI-compatible API proxy with multi-provider routing.
+#[derive(Parser)]
+#[command(name = "proxai", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the proxy server
+    Serve {
+        /// Path to TOML config file
+        #[arg(long, default_value = "config.toml")]
+        config: String,
+
+        /// Path to keys.json file
+        #[arg(long, default_value = "keys.json")]
+        key: String,
+
+        /// Path to admin Unix socket
+        #[arg(long, default_value = admin::DEFAULT_SOCKET)]
+        socket: String,
+    },
+
+    /// Client for admin operations over Unix socket
+    Cli {
+        /// Path to admin Unix socket
+        #[arg(long, default_value = admin::DEFAULT_SOCKET)]
+        socket: String,
+
+        #[command(subcommand)]
+        action: CliAction,
+    },
+
+    /// Local key management (direct filesystem, no server needed)
+    Key {
+        /// Path to keys.json file
+        #[arg(long, default_value = "keys.json")]
+        key: String,
+
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CliAction {
+    /// Generate a new API key
+    GenerateKey {
+        /// Name for the key
+        name: String,
+    },
+    /// List all API keys
+    ListKeys,
+    /// Revoke an API key by name or ID
+    RevokeKey {
+        /// Key name or numeric ID
+        target: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyAction {
+    /// Generate a new API key (writes directly to keys.json)
+    Generate {
+        /// Name for the key
+        name: String,
+    },
+    /// List all keys in keys.json
+    List,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,93 +94,56 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    match args.get(1).map(|s| s.as_str()) {
-        Some("serve") => {
-            let config_path = parse_flag(&args, "--config", "config.toml");
-            let key_path = parse_flag(&args, "--key", "keys.json");
-            let socket_path = parse_flag(&args, "--socket", admin::DEFAULT_SOCKET);
-            server::serve(&config_path, &key_path, &socket_path).await
-        }
+    match cli.command {
+        Some(Command::Serve {
+            config,
+            key,
+            socket,
+        }) => server::serve(&config, &key, &socket).await,
 
-        Some("cli") => {
-            let socket_path = parse_flag(&args, "--socket", admin::DEFAULT_SOCKET);
-            let action = find_positional(&args, 2, &["--socket"]);
-            match action.as_deref() {
-                Some("generate-key") => {
-                    let name = find_positional(&args, 2, &["--socket", "generate-key"])
-                        .ok_or_else(|| {
-                            ProxyError::InvalidRequest(
-                                "usage: proxai cli --socket <path> generate-key <name>".into(),
-                            )
-                        })?;
-                    cli_generate_key(&socket_path, &name).await
-                }
-                Some("list-keys") => cli_list_keys(&socket_path).await,
-                Some("revoke-key") => {
-                    let target = find_positional(&args, 2, &["--socket", "revoke-key"])
-                        .ok_or_else(|| {
-                            ProxyError::InvalidRequest(
-                                "usage: proxai cli --socket <path> revoke-key <name-or-id>".into(),
-                            )
-                        })?;
-                    cli_revoke_key(&socket_path, &target).await
-                }
-                _ => {
-                    eprintln!(
-                        "usage: proxai cli --socket <path> <generate-key|list-keys|revoke-key> [arg]"
-                    );
-                    Ok(())
-                }
+        Some(Command::Cli { socket, action }) => match action {
+            CliAction::GenerateKey { name } => cli_generate_key(&socket, &name).await,
+            CliAction::ListKeys => cli_list_keys(&socket).await,
+            CliAction::RevokeKey { target } => cli_revoke_key(&socket, &target).await,
+        },
+
+        Some(Command::Key { key, action }) => match action {
+            KeyAction::Generate { name } => {
+                let km = KeyManager::new(&key);
+                let key = km.generate(&name).map_err(ProxyError::Internal)?;
+                println!("API key generated (save it — shown only once!):");
+                println!();
+                println!("  {key}");
+                println!();
+                println!("Use: Authorization: Bearer {key}");
+                Ok(())
             }
-        }
-
-        Some("key") => {
-            let key_path = parse_flag(&args, "--key", "keys.json");
-            match args.get(2).map(|s| s.as_str()) {
-                Some("generate") => {
-                    let name = find_positional(&args, 3, &["--key"]).ok_or_else(|| {
-                        ProxyError::InvalidRequest(
-                            "usage: proxai key generate --key <path> <name>".into(),
-                        )
-                    })?;
-                    let km = KeyManager::new(&key_path);
-                    let key = km.generate(&name).map_err(ProxyError::Internal)?;
-                    println!("API key generated (save it — shown only once!):");
-                    println!();
-                    println!("  {key}");
-                    println!();
-                    println!("Use: Authorization: Bearer {key}");
-                    Ok(())
+            KeyAction::List => {
+                let km = KeyManager::new(&key);
+                let keys = km.list().map_err(ProxyError::Internal)?;
+                if keys.is_empty() {
+                    println!("No keys in {key}");
+                } else {
+                    println!("Keys in {key}:");
+                    key_table(&keys);
                 }
-                Some("list") => {
-                    let km = KeyManager::new(&key_path);
-                    let keys = km.list().map_err(ProxyError::Internal)?;
-                    if keys.is_empty() {
-                        println!("No keys in {key_path}");
-                    } else {
-                        println!("Keys in {key_path}:");
-                        print_key_table(&keys);
-                    }
-                    Ok(())
-                }
-                _ => {
-                    eprintln!("usage: proxai key <generate|list> --key <path> [name]");
-                    Ok(())
-                }
+                Ok(())
             }
-        }
+        },
 
-        Some("--help" | "-h") | None => {
-            print_usage();
-            Ok(())
-        }
+        // Default: start server (backward compat)
+        None => server::serve("config.toml", "keys.json", admin::DEFAULT_SOCKET).await,
+    }
+}
 
-        _ => {
-            let config_path = "config.toml".to_string();
-            let key_path = "keys.json".to_string();
-            server::serve(&config_path, &key_path, admin::DEFAULT_SOCKET).await
-        }
+fn key_table(keys: &[key_manager::KeyInfo]) {
+    println!("{:<4} {:<20} {:<24} CREATED", "#", "NAME", "KEY");
+    for k in keys {
+        println!(
+            "{:<4} {:<20} {:<24} {}",
+            k.id, k.name, k.partial, k.created_at
+        );
     }
 }

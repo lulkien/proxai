@@ -1,6 +1,5 @@
 use crate::{
     admin::{AdminRequest, AdminResponse},
-    cli::print_key_table,
     error::{ProxyError, Result},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,7 +35,13 @@ pub async fn cli_list_keys(socket_path: &str) -> Result<()> {
             if keys.is_empty() {
                 println!("No keys.");
             } else {
-                print_key_table(&keys);
+                println!("{:<4} {:<20} {:<24} CREATED", "#", "NAME", "KEY");
+                for k in &keys {
+                    println!(
+                        "{:<4} {:<20} {:<24} {}",
+                        k.id, k.name, k.partial, k.created_at
+                    );
+                }
             }
         }
         AdminResponse::Error(e) => eprintln!("Server error: {e}"),

@@ -237,6 +237,7 @@ fn KeysPanel() -> Element {
     let mut name_input = use_signal(String::new);
     let mut generated_key = use_signal(|| None::<GenerateKeyResponse>);
     let mut error = use_signal(String::new);
+    let mut pending_revoke = use_signal(|| None::<(String, String)>); // (target, name_for_display)
 
     let on_generate = move |_| {
         let name = name_input();
@@ -313,8 +314,8 @@ fn KeysPanel() -> Element {
                                                 class: "btn btn-danger",
                                                 onclick: {
                                                     let target = k.name.clone();
-                                                    let on_revoke = on_revoke.clone();
-                                                    move |_| on_revoke(target.clone())
+                                                    let display = k.name.clone();
+                                                    move |_| pending_revoke.set(Some((target.clone(), display.clone())))
                                                 },
                                                 "Revoke"
                                             }
@@ -327,6 +328,39 @@ fn KeysPanel() -> Element {
                 }
                 Some(Err(e)) => rsx! { p { class: "error-msg", "Error: {e}" } },
                 None => rsx! { p { class: "empty", "Loading..." } },
+            }
+        }
+        // Revoke confirmation modal
+        if let Some((ref target, ref display)) = *pending_revoke.read() {
+            div {
+                style: "position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #00000088; display: flex; align-items: center; justify-content: center; z-index: 100;",
+                onclick: move |_| pending_revoke.set(None),
+                div {
+                    style: "background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; max-width: 400px;",
+                    onclick: move |e| e.stop_propagation(),
+                    p { style: "margin-bottom: 1rem; font-size: 0.95rem;",
+                        "Revoke key " span { style: "color: #58a6ff; font-weight: 600;", "{display}" } "? This cannot be undone."
+                    }
+                    div { style: "display: flex; gap: 0.5rem; justify-content: flex-end;",
+                        button {
+                            class: "btn",
+                            style: "background: #21262d; border: 1px solid #30363d; color: #c9d1d9;",
+                            onclick: move |_| pending_revoke.set(None),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-danger",
+                            style: "padding: 0.5rem 1rem;",
+                            onclick: {
+                                let t = target.clone();
+                                let revoke = on_revoke.clone();
+                                let mut pending = pending_revoke;
+                                move |_| { pending.set(None); revoke(t.clone()); }
+                            },
+                            "Revoke"
+                        }
+                    }
+                }
             }
         }
     }

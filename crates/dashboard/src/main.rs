@@ -233,7 +233,7 @@ fn UsageRow(data: KeyUsage) -> Element {
 // ── Keys panel ──
 
 fn KeysPanel() -> Element {
-    let keys = use_resource(fetch_keys);
+    let mut keys = use_resource(fetch_keys);
     let mut name_input = use_signal(String::new);
     let mut generated_key = use_signal(|| None::<GenerateKeyResponse>);
     let mut error = use_signal(String::new);
@@ -250,6 +250,7 @@ fn KeysPanel() -> Element {
                     generated_key.set(Some(resp));
                     name_input.set(String::new());
                     error.set(String::new());
+                    keys.restart();
                 }
                 Err(e) => error.set(e),
             }
@@ -258,8 +259,9 @@ fn KeysPanel() -> Element {
 
     let on_revoke = move |target: String| {
         spawn(async move {
-            if let Err(e) = revoke_key_api(&target).await {
-                error.set(e);
+            match revoke_key_api(&target).await {
+                Ok(_) => keys.restart(),
+                Err(e) => error.set(e),
             }
         });
     };

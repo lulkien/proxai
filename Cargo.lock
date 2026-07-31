@@ -1851,6 +1851,7 @@ dependencies = [
  "gloo-net",
  "serde",
  "serde_json",
+ "web-sys",
 ]
 
 [[package]]

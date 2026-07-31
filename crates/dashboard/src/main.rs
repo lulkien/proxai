@@ -119,6 +119,11 @@ input:focus{border-color:#58a6ff}
 fn app() -> Element {
     let mut tab = use_signal(|| "usage");
 
+    // Override dx's "ProxAI Dashboarddioxus | ⛺" title
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        doc.set_title("ProxAI Dashboard");
+    }
+
     rsx! {
         style { {CSS} }
         div { class: "app",

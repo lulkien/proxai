@@ -1,3 +1,6 @@
 /target
 /keys.json
 /config.toml
+*.db
+*.db-shm
+*.db-wal

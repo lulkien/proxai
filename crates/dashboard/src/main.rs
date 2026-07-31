@@ -278,7 +278,43 @@ fn KeysPanel() -> Element {
             button { class: "btn", onclick: on_generate, "Generate" }
         }
         if let Some(ref k) = *generated_key.read() {
-            div { class: "key-display", "API key (shown once!): {k.key}" }
+            // Key display modal
+            div {
+                style: "position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #00000088; display: flex; align-items: center; justify-content: center; z-index: 100;",
+                onclick: move |_| generated_key.set(None),
+                div {
+                    style: "background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; max-width: 520px; width: 90%;",
+                    onclick: move |e| e.stop_propagation(),
+                    p { style: "margin-bottom: 0.75rem; font-size: 0.9rem; color: #3fb950; font-weight: 600;",
+                        "API key generated (shown once!)"
+                    }
+                    input {
+                        style: "width: 100%; background: #0d1117; border: 1px solid #58a6ff; color: #c9d1d9; padding: 0.5rem 0.75rem; border-radius: 6px; font-family: monospace; font-size: 0.8rem; margin-bottom: 1rem;",
+                        value: "{k.key}",
+                        readonly: true,
+                    }
+                    div { style: "display: flex; gap: 0.5rem; justify-content: flex-end;",
+                        button {
+                            class: "btn",
+                            style: "background: #21262d; border: 1px solid #30363d; color: #c9d1d9;",
+                            onclick: move |_| generated_key.set(None),
+                            "Close"
+                        }
+                        button {
+                            class: "btn",
+                            onclick: {
+                                let key_val = k.key.clone();
+                                move |_| {
+                                    let _ = dioxus::document::eval(&format!(
+                                        "navigator.clipboard.writeText('{}')", key_val
+                                    ));
+                                }
+                            },
+                            "Copy"
+                        }
+                    }
+                }
+            }
         }
         if !error().is_empty() {
             div { class: "error-msg", "{error}" }

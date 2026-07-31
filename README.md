@@ -142,4 +142,4 @@ This project was written by AI (Hermes Agent / Claude). Use at your own discreti
 
 ## License
 
-MIT
+Unlicense

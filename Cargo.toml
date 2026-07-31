@@ -3,7 +3,7 @@ name = "proxai"
 version = "0.1.0"
 edition = "2024"
 description = "OpenAI-compatible API proxy with multi-provider routing"
-license = "MIT"
+license = "Unlicense"
 repository = "https://github.com/lulkien/proxai"
 
 [workspace]

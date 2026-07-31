@@ -77,45 +77,6 @@ fn fmt_num(n: u64) -> String {
 
 // ── App ──
 
-const CSS: &str = r#"
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9}
-.app{max-width:960px;margin:0 auto;padding:2rem;min-height:100vh}
-h1{font-size:1.5rem;color:#58a6ff;margin-bottom:1rem}
-h2{font-size:1rem;color:#8b949e;margin-bottom:.5rem;font-weight:400}
-.tabs{display:flex;gap:0;margin-bottom:1.5rem}
-.tab-btn{padding:.5rem 1rem;cursor:pointer;border:1px solid #30363d;background:#161b22;color:#8b949e;font-size:.85rem;font-family:inherit}
-.tab-btn:first-child{border-radius:6px 0 0 6px}
-.tab-btn:last-child{border-radius:0 6px 6px 0}
-.tab-btn.active{background:#1f6feb;color:#fff;border-color:#1f6feb}
-.cards{display:flex;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1rem 1.5rem;min-width:180px}
-.card .label{font-size:.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em}
-.card .value{font-size:1.75rem;font-weight:600;color:#f0f6fc;margin-top:.25rem}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:.75rem 1rem;border-bottom:1px solid #21262d}
-th{font-size:.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;font-weight:500}
-td{font-size:.875rem}
-.key-name{color:#58a6ff}
-.token{font-variant-numeric:tabular-nums}
-.model-badge{display:inline-block;background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb44;border-radius:4px;padding:.1rem .5rem;font-size:.75rem;margin:.15rem .25rem}
-.empty{text-align:center;color:#484f58;padding:3rem;font-style:italic}
-.error-msg{color:#f85149;font-size:.85rem;margin-bottom:1rem}
-.updated{font-size:.7rem;color:#484f58;margin-top:2rem}
-.usage-row{cursor:pointer;user-select:none}
-.usage-row:hover{color:#f0f6fc}
-.model-detail td{padding-left:2rem;font-size:.8rem;color:#8b949e}
-.form-row{display:flex;gap:.5rem;margin-bottom:1rem;align-items:center}
-input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:.5rem .75rem;border-radius:6px;font-size:.875rem;outline:none;flex:1;font-family:inherit}
-input:focus{border-color:#58a6ff}
-.btn{background:#238636;border:none;color:#fff;padding:.5rem 1rem;border-radius:6px;font-size:.875rem;cursor:pointer;font-family:inherit}
-.btn:hover{background:#2ea043}
-.btn-danger{background:#da3633;padding:.25rem .75rem;border-radius:4px;font-size:.8rem}
-.btn-danger:hover{background:#f85149}
-.key-display{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.5rem .75rem;margin-bottom:1rem;font-family:monospace;font-size:.8rem;word-break:break-all}
-.section-head{margin:2rem 0 .5rem}
-"#;
-
 fn app() -> Element {
     let mut tab = use_signal(|| "usage");
 
@@ -125,7 +86,6 @@ fn app() -> Element {
     }
 
     rsx! {
-        style { {CSS} }
         div { class: "app",
             h1 { "ProxAI Dashboard" }
             div { class: "tabs",

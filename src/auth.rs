@@ -8,6 +8,14 @@ use axum::{
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
+/// Injected into request extensions by auth middleware so handlers can
+/// track usage per-key without re-looking up the key name.
+#[derive(Clone, Debug)]
+pub struct AuthInfo {
+    pub key_hash: String,
+    pub key_name: String,
+}
+
 #[derive(Clone)]
 pub struct AuthState {
     pub key_manager: Arc<KeyManager>,
@@ -48,7 +56,7 @@ impl RateLimiter {
 pub async fn require_api_key(
     State(state): State<AuthState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     let ip = addr.ip().to_string();
@@ -60,12 +68,22 @@ pub async fn require_api_key(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
 
     match auth_header {
-        Some(key) => match state.key_manager.validate(key) {
+        Some(key) => match state.key_manager.validate(&key) {
             Ok(true) => {
                 RATE_LIMITER.reset(&ip).await;
+                let hash = crate::key_manager::hash_key(&key);
+                let name = state
+                    .key_manager
+                    .lookup_name(&key)
+                    .unwrap_or_else(|| format!("key-{}", &hash[..hash.len().min(8)]));
+                request.extensions_mut().insert(AuthInfo {
+                    key_hash: hash,
+                    key_name: name,
+                });
                 next.run(request).await
             }
             Ok(false) => {

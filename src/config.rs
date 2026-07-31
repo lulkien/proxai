@@ -6,6 +6,15 @@ pub struct Config {
     pub bind: SocketAddr,
     #[serde(default)]
     pub providers: Vec<Provider>,
+    /// Optional: dashboard web UI bind address (defaults to 127.0.0.1:3001).
+    #[serde(default)]
+    pub dashboard_bind: Option<String>,
+    /// Optional: password for dashboard auth (no auth if unset).
+    #[serde(default)]
+    pub dashboard_password: Option<String>,
+    /// Optional: SQLite database path (defaults to proxai.db).
+    #[serde(default)]
+    pub db_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

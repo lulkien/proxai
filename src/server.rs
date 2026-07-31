@@ -4,6 +4,8 @@ use crate::{
     error::{ProxyError, Result},
     handlers,
     key_manager::KeyManager,
+    metrics::UsageTracker,
+    storage::Storage,
 };
 use axum::{
     Router, middleware,
@@ -20,6 +22,7 @@ pub struct ProxyState {
     pub client: Client,
     pub config: Arc<Config>,
     pub models: Arc<HashMap<String, String>>,
+    pub tracker: Arc<UsageTracker>,
 }
 
 #[derive(Serialize)]
@@ -35,7 +38,7 @@ pub struct ModelList {
     pub data: Vec<ModelEntry>,
 }
 
-pub async fn serve(config_path: &str, key_path: &str, socket_path: &str) -> Result<()> {
+pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result<()> {
     let config =
         Arc::new(Config::load(config_path).map_err(|e| ProxyError::ConfigError(e.to_string()))?);
 
@@ -44,29 +47,39 @@ pub async fn serve(config_path: &str, key_path: &str, socket_path: &str) -> Resu
         .build()?;
 
     let models = discover_models(&client, &config).await;
-    let km = Arc::new(KeyManager::new(key_path));
+    let km = Arc::new(KeyManager::open(key_db).map_err(ProxyError::Internal)?);
 
     match km.list() {
         Ok(keys) if keys.is_empty() => {
             warn!(
-                "No API keys in {key_path} — generate one with: proxai cli --socket {socket_path} generate-key <name>"
+                "No API keys in {key_db} — generate one with: proxai cli --socket {socket_path} generate-key <name>"
             );
         }
         Err(e) => warn!("Failed to read keys: {e}"),
         _ => {}
     }
 
+    // Open SQLite database for persistent usage tracking
+    let db_path = config
+        .db_path
+        .clone()
+        .unwrap_or_else(|| "proxai.db".to_string());
+    let storage = Arc::new(Storage::open(&db_path).map_err(ProxyError::Internal)?);
+    let tracker = Arc::new(UsageTracker::new(storage));
+
     // Spawn Unix socket admin server
     let admin_km = km.clone();
+    let admin_tracker = tracker.clone();
     let admin_socket = socket_path.to_string();
     tokio::spawn(async move {
-        crate::admin::run(&admin_socket, admin_km).await;
+        crate::admin::run(&admin_socket, admin_km, admin_tracker).await;
     });
 
     let state = ProxyState {
         client,
         config: config.clone(),
         models: Arc::new(models),
+        tracker: tracker.clone(),
     };
 
     let app = Router::new()
@@ -88,6 +101,23 @@ pub async fn serve(config_path: &str, key_path: &str, socket_path: &str) -> Resu
         "Providers: {:?}",
         config.providers.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
+
+    // Spawn web dashboard
+    let dashboard_bind = config
+        .dashboard_bind
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1:3001".to_string());
+    let dashboard_router =
+        crate::webui::dashboard_router(tracker, km.clone(), &config.dashboard_password);
+    let dashboard_listener = tokio::net::TcpListener::bind(&dashboard_bind)
+        .await
+        .map_err(|e| ProxyError::Internal(format!("dashboard bind {dashboard_bind}: {e}")))?;
+    info!("Dashboard at http://{dashboard_bind}");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(dashboard_listener, dashboard_router).await {
+            tracing::error!("Dashboard server error: {e}");
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

@@ -6,13 +6,6 @@ mkdir -p /var/lib/proxai
 chown proxai:proxai /var/lib/proxai
 chmod 750 /var/lib/proxai
 
-# Create keys.json only on first install (preserve on upgrade)
-if [ ! -f /var/lib/proxai/keys.json ]; then
-    echo '{"next_id": 1, "keys": []}' > /var/lib/proxai/keys.json
-    chown proxai:proxai /var/lib/proxai/keys.json
-    chmod 600 /var/lib/proxai/keys.json
-fi
-
 # Config directory
 mkdir -p /etc/proxai
 
@@ -35,7 +28,7 @@ if [ "$1" = "configure" ] && [ -z "$2" ]; then
     echo
     echo "1. Edit /etc/proxai/config.toml and add your provider API keys."
     echo "2. Generate an API key for clients:"
-    echo "     sudo -u proxai proxai key generate --key /var/lib/proxai/keys.json <name>"
+    echo "     sudo -u proxai proxai key --key /var/lib/proxai/keys.db generate <name>"
     echo "   or start the server and use the admin socket:"
     echo "     sudo systemctl start proxai"
     echo "     proxai cli --socket /var/run/proxai/admin.sock generate-key <name>"

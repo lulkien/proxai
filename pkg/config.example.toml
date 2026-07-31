@@ -1,13 +1,22 @@
 bind = "127.0.0.1:3000"
 
+# Optional: web dashboard bind address (default: 127.0.0.1:3001)
+# dashboard_bind = "127.0.0.1:3001"
+
+# Optional: dashboard password (Bearer auth). If unset, dashboard is open.
+# dashboard_password = "changeme"
+
+# Optional: SQLite database path (default: proxai.db)
+# db_path = "/var/lib/proxai/proxai.db"
+
 # Add providers here. Example:
 #
 # [[providers]]
 # name = "deepseek"
 # url = "https://api.deepseek.com/v1"
-# api_key = "sk-your-key-here"
+# api_key = "«redacted:sk-…»"
 #
 # [[providers]]
 # name = "kimi"
 # url = "https://api.moonshot.cn/v1"
-# api_key = "sk-your-key-here"
+# api_key = "«redacted:sk-…»"

@@ -16,8 +16,8 @@ pub enum Command {
         #[arg(long, default_value = "config.toml")]
         config: String,
 
-        /// Path to keys.json file
-        #[arg(long, default_value = "keys.json")]
+        /// Path to keys SQLite database
+        #[arg(long, default_value = "keys.db")]
         key: String,
 
         /// Path to admin Unix socket
@@ -35,10 +35,10 @@ pub enum Command {
         action: CliAction,
     },
 
-    /// Local key management (direct filesystem, no server needed)
+    /// Local key management (direct SQLite, no server needed)
     Key {
-        /// Path to keys.json file
-        #[arg(long, default_value = "keys.json")]
+        /// Path to keys SQLite database
+        #[arg(long, default_value = "keys.db")]
         key: String,
 
         #[command(subcommand)]
@@ -64,12 +64,12 @@ pub enum CliAction {
 
 #[derive(Subcommand)]
 pub enum KeyAction {
-    /// Generate a new API key (writes directly to keys.json)
+    /// Generate a new API key (writes directly to keys.db)
     Generate {
         /// Name for the key
         name: String,
     },
-    /// List all keys in keys.json
+    /// List all keys in keys.db
     List,
 }
 

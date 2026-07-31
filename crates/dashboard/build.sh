@@ -1,17 +1,8 @@
 #!/usr/bin/env bash
 # Build the WASM dashboard and fix asset paths for /dashboard sub-path.
+# SCSS -> CSS compilation is handled by build.rs (grass crate).
 set -euo pipefail
 cd "$(dirname "$0")"
-
-# Compile SCSS to CSS
-echo "Compiling SCSS..."
-if command -v sass &>/dev/null; then
-  sass styles.scss styles.css --no-source-map
-elif command -v dart-sass &>/dev/null; then
-  dart-sass styles.scss styles.css --no-source-map
-else
-  echo "WARNING: sass not found, using existing styles.css"
-fi
 
 dx build
 

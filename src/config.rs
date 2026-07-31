@@ -12,9 +12,6 @@ pub struct Config {
     /// Optional: SQLite database path (defaults to proxai.db).
     #[serde(default)]
     pub db_path: Option<String>,
-    /// Optional: path to dashboard WASM dist directory (defaults to crates/dashboard/dist).
-    #[serde(default)]
-    pub dashboard_dist: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

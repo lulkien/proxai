@@ -12,7 +12,6 @@ WorkingDirectory=/var/lib/proxai
 ExecStart=/usr/bin/proxai serve \
     --config /etc/proxai/config.toml \
     --key /var/lib/proxai/keys.db \
-    --dashboard-dist /var/lib/proxai/dashboard-dist \
     --socket /var/run/proxai/admin.sock
 RuntimeDirectory=proxai
 Restart=on-failure

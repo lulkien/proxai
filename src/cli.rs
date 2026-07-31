@@ -23,10 +23,6 @@ pub enum Command {
         /// Path to admin Unix socket
         #[arg(long, default_value = crate::admin::DEFAULT_SOCKET)]
         socket: String,
-
-        /// Path to dashboard WASM dist directory
-        #[arg(long)]
-        dashboard_dist: Option<String>,
     },
 
     /// Client for admin operations over Unix socket

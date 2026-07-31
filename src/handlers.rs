@@ -1,6 +1,6 @@
 use crate::{error::ProxyError, error::Result, server::ProxyState};
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
     extract::State,
     http::{HeaderMap, StatusCode, header},
@@ -37,6 +37,7 @@ pub async fn list_models(State(state): State<ProxyState>) -> impl IntoResponse {
 pub async fn responses(
     State(state): State<ProxyState>,
     _headers: HeaderMap,
+    key_hash: Option<Extension<crate::auth::AuthInfo>>,
     body: String,
 ) -> Result<impl IntoResponse> {
     // Remap "input" -> "messages"
@@ -103,6 +104,22 @@ pub async fn responses(
     let upstream_json: Value =
         serde_json::from_slice(&body_bytes).map_err(|e| ProxyError::Internal(e.to_string()))?;
 
+    // Track metrics
+    if let Some(Extension(auth)) = key_hash {
+        let usage = upstream_json.get("usage");
+        let pt = usage
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ct = usage
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        state
+            .tracker
+            .record(&auth.key_hash, &auth.key_name, model, pt, ct);
+    }
+
     let transformed = transform_to_responses(upstream_json);
 
     let resp_body =
@@ -161,6 +178,7 @@ pub fn transform_to_responses(mut json: Value) -> Value {
 pub async fn chat_completions(
     State(state): State<ProxyState>,
     headers: HeaderMap,
+    key_hash: Option<Extension<crate::auth::AuthInfo>>,
     body: String,
 ) -> Result<impl IntoResponse> {
     let body_json: Value =
@@ -192,6 +210,11 @@ pub async fn chat_completions(
         provider.chat_url()
     );
 
+    let is_streaming = body_json
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let mut upstream_request = state
         .client
         .post(provider.chat_url())
@@ -214,21 +237,69 @@ pub async fn chat_completions(
     let status = upstream_response.status();
     let upstream_headers = upstream_response.headers().clone();
 
-    let mut response = axum::response::Response::builder().status(status);
+    // Extract auth info for metrics
+    let auth = key_hash.map(|Extension(a)| a);
 
+    if is_streaming {
+        // Streaming: pass through, only count request
+        if let Some(ref a) = auth {
+            state.tracker.record(&a.key_hash, &a.key_name, model, 0, 0);
+        }
+
+        let mut response = axum::response::Response::builder().status(status);
+
+        if let Some(ct) = upstream_headers.get(header::CONTENT_TYPE) {
+            response = response.header(header::CONTENT_TYPE, ct.clone());
+        }
+        if let Some(te) = upstream_headers.get(header::TRANSFER_ENCODING) {
+            response = response.header(header::TRANSFER_ENCODING, te.clone());
+        }
+
+        let body_stream = upstream_response.bytes_stream().map(|chunk| {
+            chunk.map_err(|e| {
+                error!("Stream error: {e}");
+                std::io::Error::other(e)
+            })
+        });
+
+        return Ok(response.body(Body::from_stream(body_stream)).unwrap());
+    }
+
+    // Non-streaming: buffer response to count tokens
+    let body_bytes = upstream_response
+        .bytes()
+        .await
+        .map_err(|e| ProxyError::UpstreamError(e.to_string()))?;
+
+    // Parse usage from upstream response
+    if let Some(ref a) = auth {
+        let (prompt_tok, comp_tok) = if status.is_success() {
+            if let Ok(json) = serde_json::from_slice::<Value>(&body_bytes) {
+                let usage = json.get("usage");
+                let pt = usage
+                    .and_then(|u| u.get("prompt_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let ct = usage
+                    .and_then(|u| u.get("completion_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                (pt, ct)
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        state
+            .tracker
+            .record(&a.key_hash, &a.key_name, model, prompt_tok, comp_tok);
+    }
+
+    let mut response = axum::response::Response::builder().status(status);
     if let Some(ct) = upstream_headers.get(header::CONTENT_TYPE) {
         response = response.header(header::CONTENT_TYPE, ct.clone());
     }
-    if let Some(te) = upstream_headers.get(header::TRANSFER_ENCODING) {
-        response = response.header(header::TRANSFER_ENCODING, te.clone());
-    }
 
-    let body_stream = upstream_response.bytes_stream().map(|chunk| {
-        chunk.map_err(|e| {
-            error!("Stream error: {e}");
-            std::io::Error::other(e)
-        })
-    });
-
-    Ok(response.body(Body::from_stream(body_stream)).unwrap())
+    Ok(response.body(Body::from(body_bytes.to_vec())).unwrap())
 }

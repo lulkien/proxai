@@ -1,48 +1,18 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, path::Path, sync::Mutex, time::Instant};
+use std::{path::Path, sync::Mutex};
 
 const KEY_ID_LEN: usize = 4;
-const KEY_STEM_LEN: usize = 32; // raw bytes
+const KEY_STEM_LEN: usize = 32;
 const KEY_PREFIX: &str = "sk-";
 
-/// How long a key stays cached in memory after last successful use.
-const CACHE_TTL_SECS: u64 = 300; // 5 minutes
-
-/// Structure of the keys.json file on disk.
-#[derive(Debug, Serialize, Deserialize)]
-struct KeyStore {
-    next_id: u64,
-    keys: Vec<KeyEntry>,
+/// Compute SHA-256 hex digest of a raw API key.
+pub fn hash_key(raw_key: &str) -> String {
+    hex::encode(Sha256::digest(raw_key.as_bytes()))
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct KeyEntry {
-    id: u64,
-    name: String,
-    /// SHA-256 hex digest of the full API key.
-    hash: String,
-    /// First 6 chars of the plaintext key (for display).
-    prefix: String,
-    /// Last 4 chars of the plaintext key (for display).
-    suffix: String,
-    created_at: String,
-}
-
-/// Cached key entry in memory.
-#[derive(Debug, Clone)]
-struct CachedKey {
-    id: u64,
-    name: String,
-    prefix: String,
-    suffix: String,
-    created_at: String,
-    /// Expiration time. Refreshed on each successful auth.
-    expires_at: Instant,
-}
-
-/// Information shown by `--list-keys`. Does not contain the full key.
+/// Information shown by list-keys. Does not contain the full key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyInfo {
     pub id: u64,
@@ -52,213 +22,204 @@ pub struct KeyInfo {
 }
 
 pub struct KeyManager {
-    path: String,
-    /// In-memory cache: hash -> CachedKey
-    cache: Mutex<HashMap<String, CachedKey>>,
+    conn: Mutex<rusqlite::Connection>,
 }
 
 impl KeyManager {
-    pub fn new(path: &str) -> Self {
+    /// Open (or create) keys.db at the given path. Migrates from keys.json
+    /// automatically if the db is empty and keys.json exists.
+    pub fn open(path: &str) -> Result<Self, String> {
+        let conn = rusqlite::Connection::open(path).map_err(|e| format!("open {path}: {e}"))?;
+
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS keys (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 hash TEXT NOT NULL UNIQUE,
+                 prefix TEXT NOT NULL,
+                 suffix TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );",
+        )
+        .map_err(|e| format!("migrate: {e}"))?;
+
         let km = Self {
-            path: path.to_string(),
-            cache: Mutex::new(HashMap::new()),
+            conn: Mutex::new(conn),
         };
-        // Load existing keys into cache on construction
-        if let Err(e) = km.warm_cache() {
-            tracing::warn!("Failed to load keys into cache on startup: {e}");
+
+        // Auto-migrate from keys.json if db is empty
+        if let Ok(true) = km.is_empty()
+            && let Err(e) = km.try_migrate_json()
+        {
+            tracing::warn!("keys.json migration skipped: {e}");
         }
-        km
+
+        Ok(km)
     }
 
-    /// Generate a new API key, store its hash + metadata, return the plaintext
-    /// key ONCE. The caller should display it and then drop it.
-    pub fn generate(&self, name: &str) -> Result<String, String> {
-        let mut store = self.load_or_init()?;
+    fn is_empty(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM keys", [], |r| r.get(0))
+            .map_err(|e| format!("count: {e}"))?;
+        Ok(count == 0)
+    }
 
+    /// Import keys from keys.json if it exists and db is empty.
+    fn try_migrate_json(&self) -> Result<(), String> {
+        let json_path = "keys.json";
+        if !Path::new(json_path).exists() {
+            return Ok(());
+        }
+        let data =
+            std::fs::read_to_string(json_path).map_err(|e| format!("read keys.json: {e}"))?;
+        let store: serde_json::Value =
+            serde_json::from_str(&data).map_err(|e| format!("parse keys.json: {e}"))?;
+
+        let keys = store
+            .get("keys")
+            .and_then(|v| v.as_array())
+            .ok_or("keys.json: missing 'keys' array")?;
+
+        let mut imported = 0;
+        for entry in keys {
+            let id = entry.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("migrated");
+            let hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+            let prefix = entry.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+            let suffix = entry.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
+            let created_at = entry
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if hash.is_empty() {
+                continue;
+            }
+
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO keys (id, name, hash, prefix, suffix, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![id, name, hash, prefix, suffix, created_at],
+            )
+            .map_err(|e| format!("insert key {id}: {e}"))?;
+            imported += 1;
+        }
+
+        if imported > 0 {
+            tracing::info!("Migrated {imported} keys from keys.json to SQLite");
+        }
+        Ok(())
+    }
+
+    /// Generate a new API key, returns the plaintext ONCE.
+    pub fn generate(&self, name: &str) -> Result<String, String> {
         let mut raw = [0u8; KEY_STEM_LEN];
         rand::thread_rng().fill(&mut raw);
         let stem = hex::encode(raw);
         let full_key = format!("{KEY_PREFIX}{stem}");
 
-        let hash = hex::encode(Sha256::digest(full_key.as_bytes()));
+        let hash = hash_key(&full_key);
 
-        let prefix = full_key.chars().take(6).collect::<String>();
-        let suffix = full_key
+        let prefix: String = full_key.chars().take(6).collect();
+        let suffix: String = full_key
             .chars()
             .rev()
             .take(KEY_ID_LEN)
             .collect::<String>()
             .chars()
             .rev()
-            .collect::<String>();
+            .collect();
 
-        let id = store.next_id;
-        store.next_id += 1;
+        let created_at = chrono_now();
 
-        let entry = KeyEntry {
-            id,
-            name: name.to_string(),
-            hash: hash.clone(),
-            prefix: prefix.clone(),
-            suffix: suffix.clone(),
-            created_at: chrono_now(),
-        };
-        store.keys.push(entry);
-
-        // Persist to disk
-        self.save(&store)?;
-
-        // Add to in-memory cache immediately
-        let mut cache = self.cache.lock().unwrap();
-        cache.insert(
-            hash.clone(),
-            CachedKey {
-                id,
-                name: name.to_string(),
-                prefix,
-                suffix,
-                created_at: chrono_now(),
-                expires_at: Instant::now() + std::time::Duration::from_secs(CACHE_TTL_SECS),
-            },
-        );
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO keys (name, hash, prefix, suffix, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![name, hash, prefix, suffix, created_at],
+        )
+        .map_err(|e| format!("insert key: {e}"))?;
 
         Ok(full_key)
     }
 
-    /// Revoke a key by name or id. Returns the revoked key's id and name,
-    /// or None if no matching key was found.
+    /// Revoke a key by name or id. Returns (id, name) of revoked key, or None.
     pub fn revoke(&self, target: &str) -> Result<Option<(u64, String)>, String> {
-        let mut store = self.load_or_init()?;
+        let conn = self.conn.lock().unwrap();
 
-        // Find key by name or id
-        let pos = store
-            .keys
-            .iter()
-            .position(|k| k.name == target || k.id.to_string() == target);
+        // Find the key first
+        let row = conn
+            .query_row(
+                "SELECT id, name FROM keys WHERE name = ?1 OR CAST(id AS TEXT) = ?1",
+                rusqlite::params![target],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok();
 
-        let removed = match pos {
-            Some(idx) => {
-                let entry = store.keys.remove(idx);
-                (entry.id, entry.name.clone(), entry.hash.clone())
+        match row {
+            Some((id, name)) => {
+                conn.execute("DELETE FROM keys WHERE id = ?1", rusqlite::params![id])
+                    .map_err(|e| format!("delete key: {e}"))?;
+                Ok(Some((id as u64, name)))
             }
-            None => return Ok(None),
-        };
-
-        // Persist to disk
-        self.save(&store)?;
-
-        // Remove from in-memory cache
-        let mut cache = self.cache.lock().unwrap();
-        cache.remove(&removed.2);
-
-        Ok(Some((removed.0, removed.1)))
+            None => Ok(None),
+        }
     }
 
-    /// List all keys (from cache — fast, no I/O).
+    /// List all keys.
     pub fn list(&self) -> Result<Vec<KeyInfo>, String> {
-        let mut cache = self.cache.lock().unwrap();
-        self.evict_expired_locked(&mut cache);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, name, prefix, suffix, created_at FROM keys ORDER BY id")
+            .map_err(|e| format!("prepare: {e}"))?;
 
-        let mut keys: Vec<KeyInfo> = cache
-            .values()
-            .map(|k| KeyInfo {
-                id: k.id,
-                name: k.name.clone(),
-                partial: format!("{}…{}", k.prefix, k.suffix),
-                created_at: k.created_at.clone(),
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(KeyInfo {
+                    id: r.get::<_, i64>(0)? as u64,
+                    name: r.get(1)?,
+                    partial: format!("{}…{}", r.get::<_, String>(2)?, r.get::<_, String>(3)?),
+                    created_at: r.get(4)?,
+                })
             })
-            .collect();
+            .map_err(|e| format!("query: {e}"))?;
+
+        let mut keys: Vec<KeyInfo> = rows.filter_map(|r| r.ok()).collect();
         keys.sort_by_key(|k| k.id);
         Ok(keys)
     }
 
-    /// Validate a raw API key. Returns Ok(true) if the key is known.
-    /// Checks in-memory cache first (fast path), falls back to disk on miss.
+    /// Validate a raw API key. Returns true if the key exists.
     pub fn validate(&self, raw_key: &str) -> Result<bool, String> {
-        let hash = hex::encode(Sha256::digest(raw_key.as_bytes()));
-
-        // Fast path: check in-memory cache
-        {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(entry) = cache.get_mut(&hash) {
-                if entry.expires_at > Instant::now() {
-                    // Refresh TTL on successful auth
-                    entry.expires_at =
-                        Instant::now() + std::time::Duration::from_secs(CACHE_TTL_SECS);
-                    return Ok(true);
-                }
-                // Expired — remove from cache, fall through to disk
-                cache.remove(&hash);
-            }
-        }
-
-        // Slow path: read from disk
-        let store = self.load_or_init()?;
-        if let Some(entry) = store.keys.iter().find(|k| k.hash == hash) {
-            // Add to cache for next time
-            let mut cache = self.cache.lock().unwrap();
-            cache.insert(
-                hash,
-                CachedKey {
-                    id: entry.id,
-                    name: entry.name.clone(),
-                    prefix: entry.prefix.clone(),
-                    suffix: entry.suffix.clone(),
-                    created_at: entry.created_at.clone(),
-                    expires_at: Instant::now() + std::time::Duration::from_secs(CACHE_TTL_SECS),
-                },
-            );
-            return Ok(true);
-        }
-
-        Ok(false)
+        let hash = hash_key(raw_key);
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM keys WHERE hash = ?1",
+                rusqlite::params![hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("validate: {e}"))?;
+        Ok(count > 0)
     }
 
-    // ── internal helpers ──
-
-    /// Load all keys from disk into the in-memory cache.
-    fn warm_cache(&self) -> Result<(), String> {
-        let store = self.load_or_init()?;
-        let mut cache = self.cache.lock().unwrap();
-        let expires_at = Instant::now() + std::time::Duration::from_secs(CACHE_TTL_SECS);
-        for entry in &store.keys {
-            cache.insert(
-                entry.hash.clone(),
-                CachedKey {
-                    id: entry.id,
-                    name: entry.name.clone(),
-                    prefix: entry.prefix.clone(),
-                    suffix: entry.suffix.clone(),
-                    created_at: entry.created_at.clone(),
-                    expires_at,
-                },
-            );
-        }
-        Ok(())
-    }
-
-    /// Remove expired entries from the cache. Caller must hold the lock.
-    fn evict_expired_locked(&self, cache: &mut HashMap<String, CachedKey>) {
-        let now = Instant::now();
-        cache.retain(|_, v| v.expires_at > now);
-    }
-
-    fn load_or_init(&self) -> Result<KeyStore, String> {
-        if Path::new(&self.path).exists() {
-            let data =
-                std::fs::read_to_string(&self.path).map_err(|e| format!("read keys: {e}"))?;
-            serde_json::from_str(&data).map_err(|e| format!("parse keys: {e}"))
-        } else {
-            Ok(KeyStore {
-                next_id: 1,
-                keys: vec![],
-            })
-        }
-    }
-
-    fn save(&self, store: &KeyStore) -> Result<(), String> {
-        let data = serde_json::to_string_pretty(store).map_err(|e| format!("serialize: {e}"))?;
-        std::fs::write(&self.path, data).map_err(|e| format!("write keys: {e}"))
+    /// Look up the display name for a raw API key.
+    pub fn lookup_name(&self, raw_key: &str) -> Option<String> {
+        let hash = hash_key(raw_key);
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT name FROM keys WHERE hash = ?1",
+            rusqlite::params![hash],
+            |r| r.get(0),
+        )
+        .ok()
     }
 }
 

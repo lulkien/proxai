@@ -1,13 +1,22 @@
 bind = "127.0.0.1:3000"
 
+# Optional: dashboard password (Bearer auth). If unset, dashboard is open.
+# dashboard_password = "changeme"
+
+# Optional: path to dashboard WASM files (can also use --dashboard-dist CLI flag)
+# dashboard_dist = "/var/lib/proxai/dashboard-dist"
+
+# Optional: SQLite database paths (defaults: keys.db, proxai.db)
+# db_path = "/var/lib/proxai/proxai.db"
+
 # Add providers here. Example:
 #
 # [[providers]]
 # name = "deepseek"
 # url = "https://api.deepseek.com/v1"
-# api_key = "sk-your-key-here"
+# api_key = "«redacted:sk-…»"
 #
 # [[providers]]
 # name = "kimi"
 # url = "https://api.moonshot.cn/v1"
-# api_key = "sk-your-key-here"
+# api_key = "«redacted:sk-…»"

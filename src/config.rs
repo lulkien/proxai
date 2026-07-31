@@ -6,6 +6,15 @@ pub struct Config {
     pub bind: SocketAddr,
     #[serde(default)]
     pub providers: Vec<Provider>,
+    /// Optional: password for dashboard auth (no auth if unset).
+    #[serde(default)]
+    pub dashboard_password: Option<String>,
+    /// Optional: SQLite database path (defaults to proxai.db).
+    #[serde(default)]
+    pub db_path: Option<String>,
+    /// Optional: path to dashboard WASM dist directory (defaults to crates/dashboard/dist).
+    #[serde(default)]
+    pub dashboard_dist: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -6,7 +6,10 @@ mod config;
 mod error;
 mod handlers;
 mod key_manager;
+mod metrics;
 mod server;
+mod storage;
+mod webui;
 
 use clap::Parser;
 use cli::{Cli, CliAction, Command, KeyAction, key_table};
@@ -30,7 +33,8 @@ async fn main() -> Result<()> {
             config,
             key,
             socket,
-        }) => server::serve(&config, &key, &socket).await,
+            dashboard_dist,
+        }) => server::serve(&config, &key, &socket, dashboard_dist.as_deref()).await,
 
         Some(Command::Cli { socket, action }) => match action {
             CliAction::GenerateKey { name } => cli_generate_key(&socket, &name).await,
@@ -40,7 +44,7 @@ async fn main() -> Result<()> {
 
         Some(Command::Key { key, action }) => match action {
             KeyAction::Generate { name } => {
-                let km = KeyManager::new(&key);
+                let km = KeyManager::open(&key).map_err(ProxyError::Internal)?;
                 let key_value = km.generate(&name).map_err(ProxyError::Internal)?;
                 println!("API key generated (save it — shown only once!):");
                 println!();
@@ -50,7 +54,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             KeyAction::List => {
-                let km = KeyManager::new(&key);
+                let km = KeyManager::open(&key).map_err(ProxyError::Internal)?;
                 let keys = km.list().map_err(ProxyError::Internal)?;
                 if keys.is_empty() {
                     println!("No keys in {key}");
@@ -62,6 +66,6 @@ async fn main() -> Result<()> {
             }
         },
 
-        None => server::serve("config.toml", "keys.json", admin::DEFAULT_SOCKET).await,
+        None => server::serve("config.toml", "keys.db", admin::DEFAULT_SOCKET, None).await,
     }
 }

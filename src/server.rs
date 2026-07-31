@@ -82,7 +82,7 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         tracker: tracker.clone(),
     };
 
-    let app = Router::new()
+    let api_routes = Router::new()
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/responses", post(handlers::responses))
@@ -94,30 +94,36 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         ))
         .with_state(state);
 
+    let dashboard_router =
+        crate::webui::dashboard_router(tracker.clone(), km.clone(), &config.dashboard_password);
+
+    let app = Router::new()
+        .nest("/dashboard", dashboard_router)
+        .merge(api_routes);
+
     let addr = config.bind;
     info!("Proxy listening on {addr} (API key required)");
+    info!("Dashboard at http://{addr}/dashboard");
     info!("Admin socket: {socket_path} (local, no auth)");
     info!(
         "Providers: {:?}",
         config.providers.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
 
-    // Spawn web dashboard
-    let dashboard_bind = config
-        .dashboard_bind
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1:3001".to_string());
-    let dashboard_router =
-        crate::webui::dashboard_router(tracker, km.clone(), &config.dashboard_password);
-    let dashboard_listener = tokio::net::TcpListener::bind(&dashboard_bind)
-        .await
-        .map_err(|e| ProxyError::Internal(format!("dashboard bind {dashboard_bind}: {e}")))?;
-    info!("Dashboard at http://{dashboard_bind}");
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(dashboard_listener, dashboard_router).await {
-            tracing::error!("Dashboard server error: {e}");
-        }
-    });
+    // Optional: serve dashboard on a separate port as well
+    if let Some(ref dashboard_bind) = config.dashboard_bind {
+        let db_router =
+            crate::webui::dashboard_router(tracker.clone(), km.clone(), &config.dashboard_password);
+        let db_listener = tokio::net::TcpListener::bind(dashboard_bind)
+            .await
+            .map_err(|e| ProxyError::Internal(format!("dashboard bind {dashboard_bind}: {e}")))?;
+        info!("Dashboard also at http://{dashboard_bind}");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(db_listener, db_router).await {
+                tracing::error!("Dashboard server error: {e}");
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

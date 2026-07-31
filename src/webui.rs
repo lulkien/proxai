@@ -283,7 +283,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
   async function fetchStats() {
     try {
-      const d = await api('GET', '/api/stats');
+      const d = await api('GET', '/dashboard/api/stats');
       let totalReq = 0, totalTok = 0;
       d.keys.forEach(k => {
         totalReq += k.total_requests;
@@ -338,7 +338,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
   async function fetchKeys() {
     try {
-      const keys = await api('GET', '/api/keys');
+      const keys = await api('GET', '/dashboard/api/keys');
       const tbody = document.getElementById('keys-table');
       if (keys.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No keys yet. Generate one above.</td></tr>';
@@ -362,7 +362,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('key-gen-error').textContent = '';
     document.getElementById('generated-key').classList.remove('show');
     try {
-      const r = await api('POST', '/api/keys/generate', { name });
+      const r = await api('POST', '/dashboard/api/keys/generate', { name });
       document.getElementById('generated-key').textContent = 'API key (shown once!): ' + r.key;
       document.getElementById('generated-key').classList.add('show');
       document.getElementById('key-name-input').value = '';
@@ -375,7 +375,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   async function revokeKey(target) {
     if (!confirm('Revoke key "' + target + '"? This cannot be undone.')) return;
     try {
-      await api('POST', '/api/keys/revoke', { target });
+      await api('POST', '/dashboard/api/keys/revoke', { target });
       fetchKeys();
     } catch(e) { alert(e.message); }
   }

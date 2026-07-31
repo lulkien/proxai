@@ -6,3 +6,5 @@
 *.db-wal
 crates/dashboard/styles.css
 pkg/dashboard-dist/
+crates/.rtk/
+crates/CLAUDE.md

@@ -48,7 +48,6 @@ bind = "127.0.0.1:3000"
 
 # Optional: SQLite paths
 # db_path = "/var/lib/proxai/proxai.db"
-# dashboard_dist = "/var/lib/proxai/dashboard-dist"
 
 [[providers]]
 name = "deepseek"
@@ -59,7 +58,7 @@ api_key = "sk-..."
 ## CLI
 
 ```
-proxai serve --config config.toml --key keys.db [--socket /tmp/proxai.sock] [--dashboard-dist path]
+proxai serve --config config.toml --key keys.db [--socket /tmp/proxai.sock]
 
 # Key management (offline)
 proxai key --key keys.db generate <name>
@@ -78,14 +77,16 @@ Built with Dioxus 0.6 (WASM). Two tabs:
 - **Usage** -- request counts per key, expandable per-model breakdown
 - **Keys** -- generate, list, and revoke keys with confirmation modal
 
-The dashboard files are compiled separately:
+Dashboard assets are compiled once and embedded into the server binary via `rust-embed`. No separate dist directory or deploy step needed.
+
+Before building the server, compile the dashboard:
 
 ```
 cd crates/dashboard
-bash build.sh    # runs `dx build` + path fix
+bash build.sh    # dx build + path fix + copy to pkg/dashboard-dist/
 ```
 
-The server serves them from a directory specified via `--dashboard-dist`.
+`build.sh` compiles SCSS (via `grass` in build.rs), runs `dx build`, fixes absolute WASM paths to be relative, and copies everything to `pkg/dashboard-dist/` where the main crate's `rust-embed` picks it up at compile time.
 
 ## Architecture
 
@@ -97,30 +98,32 @@ Admin  -> Unix socket (local, no auth) -> key management RPC
 
 | Module | Purpose |
 |--------|---------|
-| `server.rs` | Axum router, model discovery, static file serving |
+| `server.rs` | Axum router, model discovery, serves embedded dashboard |
 | `handlers.rs` | `/v1/chat/completions`, `/v1/responses`, `/v1/models` |
 | `auth.rs` | API key middleware, rate limiter, AuthInfo injection |
 | `key_manager.rs` | SQLite-backed key CRUD, auto-migration from keys.json |
 | `storage.rs` | SQLite usage tracking (proxai.db) |
 | `metrics.rs` | UsageTracker wrapper for storage |
 | `webui.rs` | Dashboard API routes (stats, key CRUD) |
+| `dashboard_assets.rs` | rust-embed: compiles dashboard WASM/JS/CSS into binary |
 | `admin.rs` | Unix socket bincode RPC |
 | `config.rs` | TOML config deserialization |
 | `cli.rs` | Clap CLI definitions |
 | `client.rs` | Admin socket client |
-| `crates/dashboard/` | Dioxus WASM dashboard app |
+| `crates/dashboard/` | Dioxus WASM dashboard app + SCSS + build.rs |
 
 ## Deployment
 
-Debian package:
+Single binary with everything baked in. Build:
 
 ```
-cargo build --release
-cargo deb
-# produces target/debian/proxai_0.1.0-1_amd64.deb
+cd crates/dashboard && bash build.sh   # compile dashboard first
+cd ../.. && cargo build --release       # dashboard assets are embedded
+cargo deb                               # produces target/debian/proxai_1.1.0-1_amd64.deb
 ```
 
 Installs to:
+
 ```
 /usr/bin/proxai
 /lib/systemd/system/proxai.service
@@ -129,12 +132,7 @@ Installs to:
 
 Post-install creates `/var/lib/proxai/`, copies config to `/etc/proxai/` on first install.
 
-Service file expects dashboard dist at `/var/lib/proxai/dashboard-dist/`. Upload separately:
-
-```
-cd crates/dashboard && bash build.sh
-scp -r target/dx/proxai-dashboard/debug/web/public/* root@host:/var/lib/proxai/dashboard-dist/
-```
+No separate dashboard upload needed -- the WASM assets are compiled into the binary via `rust-embed`. One `scp + dpkg -i` deploys everything.
 
 ## Disclaimer
 

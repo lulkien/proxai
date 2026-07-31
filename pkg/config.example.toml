@@ -1,12 +1,12 @@
 bind = "127.0.0.1:3000"
 
-# Optional: web dashboard bind address (default: 127.0.0.1:3001)
-# dashboard_bind = "127.0.0.1:3001"
-
 # Optional: dashboard password (Bearer auth). If unset, dashboard is open.
 # dashboard_password = "changeme"
 
-# Optional: SQLite database path (default: proxai.db)
+# Optional: path to dashboard WASM files (can also use --dashboard-dist CLI flag)
+# dashboard_dist = "/var/lib/proxai/dashboard-dist"
+
+# Optional: SQLite database paths (defaults: keys.db, proxai.db)
 # db_path = "/var/lib/proxai/proxai.db"
 
 # Add providers here. Example:

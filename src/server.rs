@@ -8,13 +8,20 @@ use crate::{
     storage::Storage,
 };
 use axum::{
-    Router, middleware,
+    Router,
+    extract::State,
+    middleware,
     routing::{get, post},
+};
+use axum::{
+    body::Body,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -38,7 +45,12 @@ pub struct ModelList {
     pub data: Vec<ModelEntry>,
 }
 
-pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result<()> {
+pub async fn serve(
+    config_path: &str,
+    key_db: &str,
+    socket_path: &str,
+    dashboard_dist_override: Option<&str>,
+) -> Result<()> {
     let config =
         Arc::new(Config::load(config_path).map_err(|e| ProxyError::ConfigError(e.to_string()))?);
 
@@ -94,11 +106,24 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         ))
         .with_state(state);
 
-    let dashboard_router =
-        crate::webui::dashboard_router(tracker.clone(), km.clone(), &config.dashboard_password);
+    let dashboard_api =
+        crate::webui::dashboard_api_router(tracker.clone(), km.clone(), &config.dashboard_password);
+
+    // Serve dashboard WASM files from dist directory
+    let dashboard_dist = dashboard_dist_override
+        .map(|s| s.to_string())
+        .or_else(|| config.dashboard_dist.clone())
+        .unwrap_or_else(|| "target/dx/proxai-dashboard/debug/web/public".to_string());
+    let dist = Arc::new(dashboard_dist);
+
+    let dash_files = Router::new()
+        .route("/", get(serve_dash_index))
+        .route("/{*path}", get(serve_dash_file_handler))
+        .with_state(dist.clone());
 
     let app = Router::new()
-        .nest("/dashboard", dashboard_router)
+        .nest("/dashboard/api", dashboard_api)
+        .nest("/dashboard", dash_files)
         .merge(api_routes);
 
     let addr = config.bind;
@@ -110,21 +135,6 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         config.providers.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
 
-    // Optional: serve dashboard on a separate port as well
-    if let Some(ref dashboard_bind) = config.dashboard_bind {
-        let db_router =
-            crate::webui::dashboard_router(tracker.clone(), km.clone(), &config.dashboard_password);
-        let db_listener = tokio::net::TcpListener::bind(dashboard_bind)
-            .await
-            .map_err(|e| ProxyError::Internal(format!("dashboard bind {dashboard_bind}: {e}")))?;
-        info!("Dashboard also at http://{dashboard_bind}");
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(db_listener, db_router).await {
-                tracing::error!("Dashboard server error: {e}");
-            }
-        });
-    }
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -133,6 +143,79 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
     .await?;
 
     Ok(())
+}
+
+/// Simple MIME-type mapping for dashboard static files.
+fn content_type(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html"
+    } else if path.ends_with(".js") {
+        "application/javascript"
+    } else if path.ends_with(".wasm") {
+        "application/wasm"
+    } else if path.ends_with(".css") {
+        "text/css"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+async fn serve_dash_index(State(dist): State<Arc<String>>) -> Response {
+    serve_dash_file(&dist, "").await
+}
+
+/// Axum handler that serves dashboard static files.
+async fn serve_dash_file_handler(
+    State(dist): State<Arc<String>>,
+    path: axum::extract::Path<String>,
+) -> Response {
+    serve_dash_file(&dist, &path.0).await
+}
+
+async fn serve_dash_file(dist: &str, path: &str) -> Response {
+    let file_path = if path.is_empty() || path == "/" {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
+    };
+
+    let full = PathBuf::from(dist).join(file_path);
+
+    // Prevent directory traversal
+    if !full.starts_with(dist) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
+    match tokio::fs::read(&full).await {
+        Ok(data) => {
+            let ct = content_type(file_path);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .body(Body::from(data))
+                .unwrap()
+        }
+        Err(_) => {
+            // Try index.html for directory-like paths
+            if !file_path.ends_with(".html") && !file_path.contains('.') {
+                let html = PathBuf::from(dist).join("index.html");
+                if let Ok(data) = tokio::fs::read(&html).await {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(Body::from(data))
+                        .unwrap();
+                }
+            }
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        }
+    }
 }
 
 pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String, String> {

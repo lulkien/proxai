@@ -33,7 +33,8 @@ async fn main() -> Result<()> {
             config,
             key,
             socket,
-        }) => server::serve(&config, &key, &socket).await,
+            dashboard_dist,
+        }) => server::serve(&config, &key, &socket, dashboard_dist.as_deref()).await,
 
         Some(Command::Cli { socket, action }) => match action {
             CliAction::GenerateKey { name } => cli_generate_key(&socket, &name).await,
@@ -65,6 +66,6 @@ async fn main() -> Result<()> {
             }
         },
 
-        None => server::serve("config.toml", "keys.db", admin::DEFAULT_SOCKET).await,
+        None => server::serve("config.toml", "keys.db", admin::DEFAULT_SOCKET, None).await,
     }
 }

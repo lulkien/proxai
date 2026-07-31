@@ -136,6 +136,10 @@ cd crates/dashboard && bash build.sh
 scp -r target/dx/proxai-dashboard/debug/web/public/* root@host:/var/lib/proxai/dashboard-dist/
 ```
 
+## Disclaimer
+
+This project was written by AI (Hermes Agent / Claude). Use at your own discretion.
+
 ## License
 
 MIT

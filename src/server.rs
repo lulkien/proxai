@@ -203,8 +203,9 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
                             if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
                                 for entry in data {
                                     if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
-                                        info!("  + {id} ({})", provider.name);
-                                        map.insert(id.to_string(), provider.name.clone());
+                                        let namespaced = format!("{}/{}", provider.name, id);
+                                        info!("  + {namespaced}");
+                                        map.insert(namespaced, provider.name.clone());
                                     }
                                 }
                             }

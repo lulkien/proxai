@@ -82,11 +82,10 @@ Dashboard assets are compiled once and embedded into the server binary via `rust
 Before building the server, compile the dashboard:
 
 ```
-cd crates/dashboard
-bash build.sh    # dx build + path fix + copy to pkg/dashboard-dist/
+just dashboard    # dx build + path fix + copy to pkg/
 ```
 
-`build.sh` compiles SCSS (via `grass` in build.rs), runs `dx build`, fixes absolute WASM paths to be relative, and copies everything to `pkg/dashboard-dist/` where the main crate's `rust-embed` picks it up at compile time.
+`just dashboard` runs `dx build`, fixes absolute WASM paths to be relative, and copies everything to `pkg/dashboard-dist/` where the main crate's `rust-embed` picks it up at compile time. SCSS is compiled by the dashboard crate's `build.rs` (grass).
 
 ## Architecture
 
@@ -117,9 +116,15 @@ Admin  -> Unix socket (local, no auth) -> key management RPC
 Single binary with everything baked in. Build:
 
 ```
-cd crates/dashboard && bash build.sh   # compile dashboard first
-cd ../.. && cargo build --release       # dashboard assets are embedded
-cargo deb                               # produces target/debian/proxai_1.1.0-1_amd64.deb
+just dashboard     # compile dashboard
+just server        # compile server (embeds dashboard)
+just deb           # package as .deb
+```
+
+Or the one-liner:
+
+```
+just all deb
 ```
 
 Installs to:

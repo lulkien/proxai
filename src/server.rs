@@ -89,7 +89,6 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
     let api_routes = Router::new()
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
-        .route("/v1/responses", post(handlers::responses))
         .layer(middleware::from_fn_with_state(
             auth::AuthState {
                 key_manager: km.clone(),

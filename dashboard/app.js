@@ -213,20 +213,44 @@ async function generateKey() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name })
     });
-    document.getElementById('gen-result').style.display = 'block';
-    document.getElementById('gen-result').innerHTML =
-      '<p style="color:#3fb950;font-weight:600;margin-bottom:.75rem">API key generated (shown once!)</p>'
-      + '<input style="width:100%;background:#0d1117;border:1px solid #58a6ff;padding:.5rem .75rem;border-radius:6px;font-family:monospace;font-size:.8rem;margin-bottom:1rem" value="' + data.key + '" readonly onclick="this.select()">'
-      + '<div style="display:flex;gap:.5rem;justify-content:flex-end">'
-      + '<button class="btn-sm" onclick="document.getElementById(\'gen-result\').style.display=\'none\'">Close</button>'
-      + '<button class="btn btn-sm" style="background:#21262d;border:1px solid #30363d" onclick="navigator.clipboard.writeText(\'' + data.key + '\')">Copy</button>'
-      + '</div>';
     document.getElementById('key-name-input').value = '';
+    showKeyModal(data.key);
     loadKeyList();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.style.display = 'block';
   }
+}
+
+function showKeyModal(key) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'key-modal';
+  overlay.innerHTML =
+    '<div class="modal-box" onclick="event.stopPropagation()">'
+    + '<p style="color:#3fb950;font-weight:600;margin-bottom:.75rem">API key generated (shown once!)</p>'
+    + '<input class="key-display" value="' + key + '" readonly onclick="this.select()" style="width:100%;background:#0d1117;border:1px solid #58a6ff;padding:.5rem .75rem;border-radius:6px;font-family:monospace;font-size:.8rem;margin-bottom:1rem">'
+    + '<div class="modal-actions">'
+    + '<button class="btn-sm" id="modal-copy">Copy</button>'
+    + '<button class="btn-sm" id="modal-close" style="background:#da3633;border:none;color:#fff">Close</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', closeKeyModal);
+  document.body.appendChild(overlay);
+
+  document.getElementById('modal-copy').addEventListener('click', function() {
+    navigator.clipboard.writeText(key);
+  });
+  document.getElementById('modal-close').addEventListener('click', closeKeyModal);
+
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key === 'Escape') { closeKeyModal(); document.removeEventListener('keydown', escHandler); }
+  });
+}
+
+function closeKeyModal() {
+  var m = document.getElementById('key-modal');
+  if (m) m.remove();
 }
 
 async function revokeKey(target) {

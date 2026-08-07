@@ -156,10 +156,25 @@ td { font-size: .875rem; }
   &:hover { color: #f0f6fc; }
 }
 
-.model-detail td {
-  padding-left: 2rem;
-  font-size: .8rem;
-  color: #8b949e;
+.toggle-icon {
+  display: inline-block;
+  transition: transform 0.15s;
+  width: 1em;
+  text-align: center;
+
+  &.open { transform: rotate(90deg); }
+}
+
+.model-detail {
+  display: none;
+
+  &.show { display: table-row; }
+
+  td {
+    padding-left: 2rem;
+    font-size: .8rem;
+    color: #8b949e;
+  }
 }
 
 // ── Forms ──

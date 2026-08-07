@@ -55,12 +55,12 @@ function renderUsage(data, total) {
     let badges = Object.entries(k.model_usage).map(([m, u]) =>
       '<span class="model-badge">' + m + ': ' + fmtNum(u.requests) + ' req</span>'
     ).join('');
-    return '<tr class="usage-row" onclick="this.nextElementSibling&&this.nextElementSibling.classList.toggle(\'show\')">'
-      + '<td class="key-name">' + (data.keys.length > 1 ? '\u25b6 ' : '') + k.key_name + '</td>'
+    return '<tr class="usage-row" onclick="let d=this.nextElementSibling;if(d)d.classList.toggle(\'show\');let i=this.querySelector(\'.toggle-icon\');if(i)i.classList.toggle(\'open\')">'
+      + '<td class="key-name">' + (data.keys.length > 1 ? '<span class="toggle-icon">\u25b6</span> ' : '') + k.key_name + '</td>'
       + '<td>' + fmtNum(k.total_requests) + '</td>'
       + '<td>' + (k.last_used || 'never') + '</td>'
       + '</tr>'
-      + (badges ? '<tr style="display:none"><td class="model-detail" colspan="3">' + badges + '</td></tr>' : '');
+      + (badges ? '<tr class="model-detail"><td colspan="3">' + badges + '</td></tr>' : '');
   }).join('');
 
   return '<div class="cards">'

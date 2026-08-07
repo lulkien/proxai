@@ -42,7 +42,7 @@ function renderUsage(data, total) {
       + '<td>' + fmtNum(k.total_requests) + '</td>'
       + '<td>' + (k.last_used || 'never') + '</td>'
       + '</tr>'
-      + (badges ? '<tr class="model-detail"><td colspan="3">' + badges + '</td></tr>' : '');
+      + (badges ? '<tr class="model-detail"><td colspan="3"><div class="detail-inner">' + badges + '</div></td></tr>' : '');
   }).join('');
 
   return '<div class="cards">'

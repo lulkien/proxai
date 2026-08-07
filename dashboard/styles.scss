@@ -270,6 +270,8 @@ td { font-size: .875rem; }
   user-select: none;
 
   &:hover { color: #f0f6fc; }
+
+  td { border-bottom: none; }
 }
 
 .toggle-icon {
@@ -282,14 +284,24 @@ td { font-size: .875rem; }
 }
 
 .model-detail {
-  display: none;
-
-  &.show { display: table-row; }
-
   td {
-    padding-left: 2rem;
+    padding: 0 2rem;
     font-size: .8rem;
     color: #8b949e;
+  }
+
+  .detail-inner {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s ease, padding 0.2s ease;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  &.show .detail-inner {
+    max-height: 60px;
+    padding-top: .25rem;
+    padding-bottom: .5rem;
   }
 }
 

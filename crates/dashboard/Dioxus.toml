@@ -1,9 +1,0 @@
-[application]
-name = "ProxAI Dashboard"
-
-[web]
-# Use relative paths for assets
-base_path = ""
-
-[web.watcher]
-reload = false

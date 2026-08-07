@@ -5,22 +5,16 @@ set positional-arguments := false
 _default:
     @just --list
 
-# Build the WASM dashboard only
-dashboard:
-    cd crates/dashboard && dx build
-    sed -i 's|/\./wasm/|./wasm/|g' target/dx/proxai-dashboard/debug/web/public/index.html
-    sed -i 's|"/\./wasm/|"./wasm/|g' target/dx/proxai-dashboard/debug/web/public/wasm/proxai-dashboard.js
-    rm -rf pkg/dashboard-dist
-    cp -r target/dx/proxai-dashboard/debug/web/public pkg/dashboard-dist
-    @echo "Dashboard assets ready for embed"
+# Compile SCSS to CSS
+css:
+    sass dashboard/styles.scss dashboard/styles.css --no-source-map --style=compressed
 
-# Build the server binary only
-server: dashboard
+# Build the server binary (static dashboard embedded from dashboard/)
+server: css
     cargo build --release
 
-# Build everything (dashboard + server)
-all: dashboard
-    cargo build --release
+# Build everything
+all: server
 
 # Build the Debian package
 deb: all
@@ -39,8 +33,7 @@ ci: check all deb
 # Clean all build artifacts
 clean:
     cargo clean
-    rm -rf pkg/dashboard-dist
-    rm -rf crates/dashboard/styles.css
+    rm -f dashboard/styles.css
 
 # Bump version (usage: just bump 1.3.0)
 bump VERSION:

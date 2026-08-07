@@ -1,6 +1,6 @@
 # ProxAI
 
-OpenAI-compatible API proxy with multi-provider routing, key management, and a WASM dashboard.
+OpenAI-compatible API proxy with multi-provider routing, key management, and a static web dashboard.
 
 ## Features
 
@@ -10,13 +10,13 @@ OpenAI-compatible API proxy with multi-provider routing, key management, and a W
 - **Rate limiting** -- 20 failed auth attempts per IP in 60s returns 429
 - **Admin socket** -- Unix socket RPC for key management (no API key needed)
 - **Usage tracking** -- per-key request counts persisted in SQLite
-- **WASM dashboard** -- Dioxus web UI at `/dashboard` with stats and key management
+- **Static dashboard** -- plain HTML dashboard at `/dashboard` with stats and key management
 
 ## Quick start
 
 ```
-# Build
-cargo build --release
+# Build (requires sass CLI: npm install -g sass)
+just all
 
 # Edit config with your provider API key
 cp pkg/config.example.toml config.toml
@@ -30,7 +30,7 @@ vim config.toml
 
 # Use it
 curl http://127.0.0.1:3000/v1/chat/completions \
-  -H "Authorization: Bearer sk-..." \
+  -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}'
 ```
@@ -72,26 +72,32 @@ proxai cli --socket /tmp/proxai.sock revoke-key <name-or-id>
 
 ## Dashboard
 
-Built with Dioxus 0.6 (WASM). Two tabs:
+Static HTML + SCSS. Two tabs:
 
 - **Usage** -- request counts per key, expandable per-model breakdown
 - **Keys** -- generate, list, and revoke keys with confirmation modal
 
-Dashboard assets are compiled once and embedded into the server binary via `rust-embed`. No separate dist directory or deploy step needed.
+Dashboard files live in `dashboard/` and are compiled into the server binary via `rust-embed`. No WASM, no separate deploy step.
 
-Before building the server, compile the dashboard:
+SCSS is compiled at build time by the `css` just recipe:
 
 ```
-just dashboard    # dx build + path fix + copy to pkg/
+just css           # sass dashboard/styles.scss -> dashboard/styles.css
+just server        # compile server (embeds dashboard/)
+just deb           # package as .deb
 ```
 
-`just dashboard` runs `dx build`, fixes absolute WASM paths to be relative, and copies everything to `pkg/dashboard-dist/` where the main crate's `rust-embed` picks it up at compile time. SCSS is compiled by the dashboard crate's `build.rs` (grass).
+Or the one-liner:
+
+```
+just all deb
+```
 
 ## Architecture
 
 ```
 Client -> :3000/v1/* (API key auth) -> upstream provider
-Client -> :3000/dashboard/* (optional password) -> WASM dashboard
+Client -> :3000/dashboard/* (optional password) -> static dashboard
 Admin  -> Unix socket (local, no auth) -> key management RPC
 ```
 
@@ -104,21 +110,21 @@ Admin  -> Unix socket (local, no auth) -> key management RPC
 | `storage.rs` | SQLite usage tracking (proxai.db) |
 | `metrics.rs` | UsageTracker wrapper for storage |
 | `webui.rs` | Dashboard API routes (stats, key CRUD) |
-| `dashboard_assets.rs` | rust-embed: compiles dashboard WASM/JS/CSS into binary |
+| `dashboard_assets.rs` | rust-embed: embeds dashboard HTML/CSS into binary |
 | `admin.rs` | Unix socket bincode RPC |
 | `config.rs` | TOML config deserialization |
 | `cli.rs` | Clap CLI definitions |
 | `client.rs` | Admin socket client |
-| `crates/dashboard/` | Dioxus WASM dashboard app + SCSS + build.rs |
+| `dashboard/` | Static HTML + SCSS dashboard |
 
 ## Deployment
 
 Single binary with everything baked in. Build:
 
 ```
-just dashboard     # compile dashboard
-just server        # compile server (embeds dashboard)
-just deb           # package as .deb
+just css            # compile SCSS
+just server         # compile server (embeds dashboard)
+just deb            # package as .deb
 ```
 
 Or the one-liner:
@@ -137,7 +143,7 @@ Installs to:
 
 Post-install creates `/var/lib/proxai/`, copies config to `/etc/proxai/` on first install.
 
-No separate dashboard upload needed -- the WASM assets are compiled into the binary via `rust-embed`. One `scp + dpkg -i` deploys everything.
+No separate dashboard upload needed -- the HTML/CSS assets are compiled into the binary via `rust-embed`. One `scp + dpkg -i` deploys everything.
 
 ## Disclaimer
 

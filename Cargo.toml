@@ -7,7 +7,7 @@ license = "Unlicense"
 repository = "https://github.com/lulkien/proxai"
 
 [workspace]
-members = ["crates/dashboard"]
+members = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

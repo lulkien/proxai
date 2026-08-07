@@ -106,9 +106,19 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         .route("/", get(serve_dash_index_embedded))
         .route("/{*path}", get(serve_dash_file_embedded));
 
+    // Redirect /dashboard -> /dashboard/ so relative CSS/JS resolve correctly
+    async fn redirect_dashboard() -> Response {
+        Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header(header::LOCATION, "/dashboard/")
+            .body(Body::empty())
+            .unwrap()
+    }
+
     let app = Router::new()
         .nest("/dashboard/api", dashboard_api)
-        .nest("/dashboard", dash_files)
+        .nest("/dashboard/", dash_files)
+        .route("/dashboard", get(redirect_dashboard))
         .merge(api_routes);
 
     let addr = config.bind;

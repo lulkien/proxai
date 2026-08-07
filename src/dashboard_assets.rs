@@ -1,7 +1,6 @@
 use rust_embed::RustEmbed;
 
-/// Embedded dashboard WASM files. Populated by build.sh which copies dx output
-/// to pkg/dashboard-dist/ before compiling.
+/// Embedded dashboard files (HTML + CSS compiled from SCSS).
 #[derive(RustEmbed)]
-#[folder = "pkg/dashboard-dist"]
+#[folder = "dashboard/"]
 pub struct DashboardAssets;

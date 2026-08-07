@@ -4,8 +4,7 @@
 *.db
 *.db-shm
 *.db-wal
-crates/dashboard/styles.css
-pkg/dashboard-dist/
+/dashboard/styles.css
 crates/.rtk/
 crates/CLAUDE.md
 Cargo.lock

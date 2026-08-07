@@ -85,4 +85,9 @@ impl UsageTracker {
             updated_at: Utc::now(),
         }
     }
+
+    /// Time-bucketed usage for the chart.
+    pub fn timeline(&self, range: &str) -> Vec<crate::storage::TimelineBucket> {
+        self.storage.timeline(range)
+    }
 }

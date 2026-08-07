@@ -68,7 +68,11 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         .db_path
         .clone()
         .unwrap_or_else(|| "proxai.db".to_string());
-    let storage = Arc::new(Storage::open(&db_path).map_err(ProxyError::Internal)?);
+    let (tz_secs, tz_sql) = config.timezone_offset();
+    let storage = Arc::new(
+        Storage::open_with_tz(&db_path, tz_secs, tz_sql)
+            .map_err(ProxyError::Internal)?,
+    );
     let tracker = Arc::new(UsageTracker::new(storage));
 
     // Spawn Unix socket admin server

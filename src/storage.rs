@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
+    tz_offset_secs: i32,
+    tz_sql: String,
 }
 
 impl Storage {
-    pub fn open(path: &str) -> Result<Self, String> {
+    pub fn open_with_tz(path: &str, tz_offset_secs: i32, tz_sql: String) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open db: {e}"))?;
 
         conn.execute_batch(
@@ -24,12 +26,15 @@ impl Storage {
                  created_at TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(key_hash);
-             CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(key_hash, model);",
+             CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(key_hash, model);
+             CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at);",
         )
         .map_err(|e| format!("migrate: {e}"))?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            tz_offset_secs,
+            tz_sql,
         })
     }
 
@@ -55,18 +60,18 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
 
         // Per-key aggregates
-        let mut stmt = conn
-            .prepare(
-                "SELECT key_hash, key_name,
-                        COUNT(*) as total_requests,
-                        COALESCE(SUM(prompt_tokens), 0) as total_prompt,
-                        COALESCE(SUM(completion_tokens), 0) as total_completion,
-                        MAX(created_at) as last_used
-                 FROM usage
-                 GROUP BY key_hash
-                 ORDER BY last_used DESC",
-            )
-            .unwrap();
+        let tz = &self.tz_sql;
+        let sql = format!(
+            "SELECT key_hash, key_name,
+                    COUNT(*) as total_requests,
+                    COALESCE(SUM(prompt_tokens), 0) as total_prompt,
+                    COALESCE(SUM(completion_tokens), 0) as total_completion,
+                    datetime(MAX(created_at), '{tz}') as last_used
+             FROM usage
+             GROUP BY key_hash
+             ORDER BY MAX(created_at) DESC"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
 
         let mut rows: Vec<KeyUsageRow> = stmt
             .query_map([], |row| {
@@ -121,15 +126,115 @@ impl Storage {
         rows
     }
 
-    /// Update the display name for all records matching a key hash.
-    #[allow(dead_code)]
-    pub fn set_key_name(&self, key_hash: &str, name: &str) {
+    /// Return time-bucketed usage for the chart.
+    ///
+    /// `range` is one of `1d`, `7d`. 1d groups by 2-hour; 7d by day.
+    pub fn timeline(&self, range: &str) -> Vec<TimelineBucket> {
+        use chrono::Timelike;
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE usage SET key_name = ?1 WHERE key_hash = ?2 AND key_name = ''",
-            params![name, key_hash],
+
+        // All times in configured timezone.
+        let tz_offset = &self.tz_sql;
+        let (group_expr, since) = match range {
+            "1d" => (
+                format!("strftime('%Y-%m-%dT', created_at, '{tz_offset}') || printf('%02d', (CAST(strftime('%H', created_at, '{tz_offset}') AS INTEGER) / 2) * 2)"),
+                "1 days",
+            ),
+            _ => (
+                format!("strftime('%Y-%m-%d', created_at, '{tz_offset}')"),
+                "7 days",
+            ),
+        };
+
+        let sql = format!(
+            "SELECT {group_expr} AS bucket,
+                    key_name,
+                    COUNT(*) AS requests
+             FROM usage
+             WHERE created_at >= datetime('now', '{tz_offset}', '-{since}')
+             GROUP BY bucket, key_name
+             ORDER BY bucket ASC, requests DESC"
         );
+
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Group rows into buckets
+        let mut buckets: Vec<TimelineBucket> = Vec::new();
+        for (bucket, key_name, requests) in rows {
+            match buckets.last_mut() {
+                Some(b) if b.time == bucket => b.keys.push(TimelineEntry {
+                    key_name,
+                    requests: requests as u64,
+                }),
+                _ => buckets.push(TimelineBucket {
+                    time: bucket,
+                    keys: vec![TimelineEntry {
+                        key_name,
+                        requests: requests as u64,
+                    }],
+                }),
+            }
+        }
+
+        // Pad empty buckets so the chart always shows the full range.
+        let tz = chrono::FixedOffset::east_opt(self.tz_offset_secs).unwrap();
+        let now = chrono::Utc::now().with_timezone(&tz);
+        let all_times: Vec<String> = match range {
+            "1d" => {
+                // 12 two-hour buckets ending at the current time block.
+                let cur_block = (now.hour() / 2) * 2;
+                let base = now.date_naive().and_hms_opt(cur_block, 0, 0).unwrap()
+                    .and_local_timezone(tz).unwrap();
+                (0..12)
+                    .rev()
+                    .map(|i| (base - chrono::Duration::hours(i as i64 * 2))
+                        .format("%Y-%m-%dT%H").to_string())
+                    .collect()
+            }
+            _ => {
+                (0..7i64)
+                    .rev()
+                    .map(|d| (now - chrono::Duration::days(d)).format("%Y-%m-%d").to_string())
+                    .collect()
+            }
+        };
+
+        let mut padded: Vec<TimelineBucket> = Vec::new();
+        for t in all_times {
+            match buckets.iter().find(|b| b.time == t) {
+                Some(existing) => padded.push(existing.clone()),
+                None => padded.push(TimelineBucket {
+                    time: t,
+                    keys: Vec::new(),
+                }),
+            }
+        }
+
+        padded
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineBucket {
+    pub time: String,
+    pub keys: Vec<TimelineEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineEntry {
+    pub key_name: String,
+    pub requests: u64,
 }
 
 #[derive(Debug, Clone)]

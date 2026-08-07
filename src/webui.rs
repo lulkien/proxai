@@ -22,6 +22,7 @@ pub fn dashboard_api_router(
 
     Router::new()
         .route("/stats", get(stats_handler))
+        .route("/stats/timeline", get(timeline_handler))
         .route("/keys", get(list_keys))
         .route(
             "/keys/generate",
@@ -80,6 +81,29 @@ async fn stats_handler(
 ) -> Result<Json<crate::metrics::UsageSnapshot>, StatusCode> {
     check_auth(&headers, &state.password)?;
     Ok(Json(state.tracker.snapshot()))
+}
+
+#[derive(Debug, Deserialize)]
+struct TimelineQuery {
+    #[serde(default = "default_range")]
+    range: String,
+}
+
+fn default_range() -> String {
+    "1d".into()
+}
+
+async fn timeline_handler(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<TimelineQuery>,
+) -> Result<Json<Vec<crate::storage::TimelineBucket>>, StatusCode> {
+    check_auth(&headers, &state.password)?;
+    let range = match q.range.as_str() {
+        "1d" | "7d" => q.range.as_str(),
+        _ => "1d",
+    };
+    Ok(Json(state.tracker.timeline(range)))
 }
 
 #[derive(Debug, Deserialize)]

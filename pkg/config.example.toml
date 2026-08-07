@@ -6,6 +6,9 @@ bind = "127.0.0.1:3000"
 # Optional: SQLite database path (defaults to proxai.db).
 # db_path = "/var/lib/proxai/proxai.db"
 
+# Optional: timezone for dashboard chart, e.g. "+07:00" (default: UTC).
+# timezone = "+07:00"
+
 # Add providers here. Example:
 #
 # [[providers]]

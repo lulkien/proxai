@@ -82,6 +82,19 @@ pub async fn chat_completions(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Ask upstream to include token usage in the final SSE chunk so we can
+    // count tokens for streaming requests too.
+    if is_streaming {
+        let stream_opts = body_json.as_object_mut().and_then(|o| {
+            o.entry("stream_options")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+        });
+        if let Some(so) = stream_opts {
+            so.entry("include_usage").or_insert(Value::Bool(true));
+        }
+    }
+
     let upstream_body = serde_json::to_string(&body_json).unwrap_or(body);
 
     let mut upstream_request = state
@@ -110,10 +123,46 @@ pub async fn chat_completions(
     let auth = key_hash.map(|Extension(a)| a);
 
     if is_streaming {
-        // Streaming: pass through, only count request
-        if let Some(ref a) = auth {
-            state.tracker.record(&a.key_hash, &a.key_name, &model, 0, 0);
-        }
+        // Stream the response through while capturing SSE `usage` chunks so we
+        // can still count tokens (upstream sends usage in a final data: chunk
+        // when stream_options.include_usage is set).
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            std::result::Result<axum::body::Bytes, std::io::Error>,
+        >(16);
+
+        let tracker = state.tracker.clone();
+        let model = model.clone();
+        let auth = auth.clone();
+        tokio::spawn(async move {
+            let mut buf = String::new();
+            let mut stream = upstream_response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        if let Ok(s) = std::str::from_utf8(&bytes) {
+                            append_tail(&mut buf, s, 64 * 1024);
+                        }
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            break; // client disconnected
+                        }
+                    }
+                    Err(e) => {
+                        error!("Stream error: {e}");
+                        let _ = tx.send(Err(std::io::Error::other(e))).await;
+                        break;
+                    }
+                }
+            }
+            // Count tokens from whatever usage chunk(s) we captured.
+            if let Some(a) = auth {
+                let (pt, ct) = sse_usage_tokens(&buf);
+                tracker.record(&a.key_hash, &a.key_name, &model, pt, ct);
+            }
+        });
+
+        let body_stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
 
         let mut response = axum::response::Response::builder().status(status);
 
@@ -123,13 +172,6 @@ pub async fn chat_completions(
         if let Some(te) = upstream_headers.get(header::TRANSFER_ENCODING) {
             response = response.header(header::TRANSFER_ENCODING, te.clone());
         }
-
-        let body_stream = upstream_response.bytes_stream().map(|chunk| {
-            chunk.map_err(|e| {
-                error!("Stream error: {e}");
-                std::io::Error::other(e)
-            })
-        });
 
         return Ok(response.body(Body::from_stream(body_stream)).unwrap());
     }
@@ -171,4 +213,80 @@ pub async fn chat_completions(
     }
 
     Ok(response.body(Body::from(body_bytes.to_vec())).unwrap())
+}
+
+/// Extract (prompt_tokens, completion_tokens) from an SSE response body.
+/// Upstream sends usage in a final `data: {...}` chunk when
+/// `stream_options.include_usage` is enabled.
+fn sse_usage_tokens(body: &str) -> (u64, u64) {
+    let mut prompt = 0u64;
+    let mut completion = 0u64;
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim_start();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<Value>(data)
+            && let Some(usage) = json.get("usage")
+        {
+            if let Some(v) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                prompt = v;
+            }
+            if let Some(v) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                completion = v;
+            }
+        }
+    }
+    (prompt, completion)
+}
+
+/// Append `s` to `buf`, keeping only the trailing `max` bytes (UTF-8 safe).
+/// SSE usage arrives in the final chunk, so only the tail matters for counting.
+fn append_tail(buf: &mut String, s: &str, max: usize) {
+    buf.push_str(s);
+    if buf.len() <= max {
+        return;
+    }
+    let mut start = buf.len() - max;
+    while !buf.is_char_boundary(start) {
+        start -= 1;
+    }
+    buf.drain(..start);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_usage_tokens_parses_final_usage_chunk() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                    data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n\
+                    data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n\
+                    data: [DONE]\n\n";
+        assert_eq!(sse_usage_tokens(body), (11, 7));
+    }
+
+    #[test]
+    fn sse_usage_tokens_no_usage_is_zero() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        assert_eq!(sse_usage_tokens(body), (0, 0));
+    }
+
+    #[test]
+    fn append_tail_truncates_utf8_safely() {
+        let mut buf = String::new();
+        append_tail(&mut buf, "abc", 10);
+        assert_eq!(buf, "abc");
+
+        // "aaéé" is 6 bytes (é = 2 bytes); truncating to 3 bytes must back up
+        // to a char boundary rather than splitting the multi-byte char.
+        let mut buf = String::new();
+        append_tail(&mut buf, "aaéé", 3);
+        assert_eq!(buf, "éé");
+    }
 }

@@ -80,7 +80,11 @@ async fn stats_handler(
     headers: HeaderMap,
 ) -> Result<Json<crate::metrics::UsageSnapshot>, StatusCode> {
     check_auth(&headers, &state.password)?;
-    Ok(Json(state.tracker.snapshot()))
+    let active = state
+        .key_manager
+        .active_hashes()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(state.tracker.snapshot(&active)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +107,11 @@ async fn timeline_handler(
         "1d" | "7d" => q.range.as_str(),
         _ => "1d",
     };
-    Ok(Json(state.tracker.timeline(range)))
+    let active = state
+        .key_manager
+        .active_hashes()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(state.tracker.timeline(range, &active)))
 }
 
 #[derive(Debug, Deserialize)]

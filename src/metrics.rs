@@ -1,7 +1,8 @@
 use crate::storage::Storage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Snapshot returned to the dashboard / admin CLI.
 /// Built from Storage data at query time.
@@ -19,6 +20,8 @@ pub struct KeyUsageSnapshot {
     pub total_completion_tokens: u64,
     pub last_used: Option<String>,
     pub model_usage: HashMap<String, ModelUsageSnapshot>,
+    /// True when the key has been revoked/deleted but usage rows remain.
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +55,11 @@ impl UsageTracker {
     }
 
     /// Snapshot of current usage by querying Storage.
-    pub fn snapshot(&self) -> UsageSnapshot {
-        let rows = self.storage.snapshot();
+    ///
+    /// `active` holds the hashes of keys that still exist; usage rows for
+    /// revoked keys are kept but flagged `deleted`.
+    pub fn snapshot(&self, active: &HashSet<String>) -> UsageSnapshot {
+        let rows = self.storage.snapshot(active);
         UsageSnapshot {
             keys: rows
                 .into_iter()
@@ -79,6 +85,7 @@ impl UsageTracker {
                         total_completion_tokens: r.total_completion_tokens as u64,
                         last_used: r.last_used,
                         model_usage,
+                        deleted: r.deleted,
                     }
                 })
                 .collect(),
@@ -87,7 +94,14 @@ impl UsageTracker {
     }
 
     /// Time-bucketed usage for the chart.
-    pub fn timeline(&self, range: &str) -> Vec<crate::storage::TimelineBucket> {
-        self.storage.timeline(range)
+    ///
+    /// `active` holds the hashes of keys that still exist; entries for
+    /// revoked keys are kept but flagged `deleted`.
+    pub fn timeline(
+        &self,
+        range: &str,
+        active: &HashSet<String>,
+    ) -> Vec<crate::storage::TimelineBucket> {
+        self.storage.timeline(range, active)
     }
 }

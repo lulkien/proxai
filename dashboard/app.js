@@ -41,12 +41,15 @@ async function loadUsage() {
 }
 
 function renderUsage(data, total) {
+  let activeKeys = data.keys.filter(k => !k.deleted).length;
   let rows = data.keys.map(k => {
     let badges = Object.entries(k.model_usage).map(([m, u]) =>
       '<span class="model-badge">' + esc(m) + ': ' + fmtNum(u.requests) + ' req</span>'
     ).join('');
+    let nameCell = esc(k.key_name)
+      + (k.deleted ? ' <span class="deleted-mark">(deleted)</span>' : '');
     return '<tr class="usage-row" onclick="let d=this.nextElementSibling;if(d)d.classList.toggle(\'show\');let i=this.querySelector(\'.toggle-icon\');if(i)i.classList.toggle(\'open\')">'
-      + '<td class="key-name">' + (data.keys.length > 1 ? '<span class="toggle-icon">\u25b6</span> ' : '') + esc(k.key_name) + '</td>'
+      + '<td class="key-name">' + (data.keys.length > 1 ? '<span class="toggle-icon">\u25b6</span> ' : '') + nameCell + '</td>'
       + '<td>' + fmtNum(k.total_requests) + '</td>'
       + '<td>' + (k.last_used || 'never') + '</td>'
       + '</tr>'
@@ -55,7 +58,7 @@ function renderUsage(data, total) {
 
   return '<div class="cards">'
     + '<div class="card"><div class="label">Total Requests</div><div class="value">' + fmtNum(total) + '</div></div>'
-    + '<div class="card"><div class="label">Active Keys</div><div class="value">' + data.keys.length + '</div></div>'
+    + '<div class="card"><div class="label">Active Keys</div><div class="value">' + activeKeys + '</div></div>'
     + '</div>'
     + (data.keys.length === 0
       ? '<div class="empty">No usage yet. Send a request to start tracking.</div>'
@@ -128,8 +131,9 @@ function renderChart(buckets, range) {
     for (var j = 0; j < b.keys.length; j++) {
       var k = b.keys[j];
       var pct = total > 0 ? (k.requests / total) * 100 : 0;
-      segments += '<div class="chart-segment" style="height:' + pct.toFixed(1) + '%;background:' + getColor(k.key_name)
-        + '" data-tip="' + esc(k.key_name) + ': ' + fmtNum(k.requests) + ' req"></div>';
+      var tip = esc(k.key_name) + (k.deleted ? ' (deleted)' : '') + ': ' + fmtNum(k.requests) + ' req';
+      segments += '<div class="chart-segment' + (k.deleted ? ' deleted' : '') + '" style="height:' + pct.toFixed(1) + '%;background:' + getColor(k.key_name)
+        + '" data-tip="' + tip + '"></div>';
     }
 
     var label = range === '1d' ? b.time.slice(11) : b.time.slice(5);
@@ -139,14 +143,7 @@ function renderChart(buckets, range) {
       + '</div>';
   }
 
-  var legend = '';
-  var names = Object.keys(colorMap);
-  for (var i = 0; i < names.length; i++) {
-    legend += '<span class="legend-item"><span class="legend-dot" style="background:' + colorMap[names[i]] + '"></span>' + esc(names[i]) + '</span>';
-  }
-
   wrap.innerHTML = '<div class="chart-bars">' + bars + '</div>'
-    + '<div class="chart-legend">' + legend + '</div>'
     + '<div class="chart-tooltip" id="chart-tooltip" style="display:none"></div>';
 
   // Tooltip

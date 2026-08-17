@@ -1,4 +1,5 @@
 use rusqlite::{Connection, params};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// Thin wrapper around SQLite for usage persistence.
@@ -56,7 +57,10 @@ impl Storage {
     }
 
     /// Return aggregated usage per key, with per-model breakdown.
-    pub fn snapshot(&self) -> Vec<KeyUsageRow> {
+    ///
+    /// `active` holds the hashes of keys that still exist; rows for revoked
+    /// keys are kept but flagged `deleted`.
+    pub fn snapshot(&self, active: &HashSet<String>) -> Vec<KeyUsageRow> {
         let conn = self.conn.lock().unwrap();
 
         // Per-key aggregates
@@ -83,11 +87,16 @@ impl Storage {
                     total_completion_tokens: row.get(4)?,
                     last_used: row.get(5)?,
                     models: Vec::new(),
+                    deleted: false,
                 })
             })
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
+
+        for row in &mut rows {
+            row.deleted = !active.contains(&row.key_hash);
+        }
 
         // Per-model breakdown for each key
         let mut model_stmt = conn
@@ -129,7 +138,9 @@ impl Storage {
     /// Return time-bucketed usage for the chart.
     ///
     /// `range` is one of `1d`, `7d`. 1d groups by 2-hour; 7d by day.
-    pub fn timeline(&self, range: &str) -> Vec<TimelineBucket> {
+    /// `active` holds the hashes of keys that still exist; entries for
+    /// revoked keys are kept but flagged `deleted`.
+    pub fn timeline(&self, range: &str, active: &HashSet<String>) -> Vec<TimelineBucket> {
         use chrono::Timelike;
         let conn = self.conn.lock().unwrap();
 
@@ -148,21 +159,23 @@ impl Storage {
 
         let sql = format!(
             "SELECT {group_expr} AS bucket,
+                    key_hash,
                     key_name,
                     COUNT(*) AS requests
              FROM usage
              WHERE created_at >= datetime('now', '{tz_offset}', '-{since}')
-             GROUP BY bucket, key_name
+             GROUP BY bucket, key_hash, key_name
              ORDER BY bucket ASC, requests DESC"
         );
 
         let mut stmt = conn.prepare(&sql).unwrap();
-        let rows: Vec<(String, String, i64)> = stmt
+        let rows: Vec<(String, String, String, i64)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .unwrap()
@@ -171,18 +184,17 @@ impl Storage {
 
         // Group rows into buckets
         let mut buckets: Vec<TimelineBucket> = Vec::new();
-        for (bucket, key_name, requests) in rows {
+        for (bucket, key_hash, key_name, requests) in rows {
+            let entry = TimelineEntry {
+                key_name,
+                requests: requests as u64,
+                deleted: !active.contains(&key_hash),
+            };
             match buckets.last_mut() {
-                Some(b) if b.time == bucket => b.keys.push(TimelineEntry {
-                    key_name,
-                    requests: requests as u64,
-                }),
+                Some(b) if b.time == bucket => b.keys.push(entry),
                 _ => buckets.push(TimelineBucket {
                     time: bucket,
-                    keys: vec![TimelineEntry {
-                        key_name,
-                        requests: requests as u64,
-                    }],
+                    keys: vec![entry],
                 }),
             }
         }
@@ -235,6 +247,8 @@ pub struct TimelineBucket {
 pub struct TimelineEntry {
     pub key_name: String,
     pub requests: u64,
+    /// True when the key has been revoked/deleted but usage rows remain.
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +260,8 @@ pub struct KeyUsageRow {
     pub total_completion_tokens: i64,
     pub last_used: Option<String>,
     pub models: Vec<ModelUsageRow>,
+    /// True when the key has been revoked/deleted but usage rows remain.
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -254,4 +270,78 @@ pub struct ModelUsageRow {
     pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_storage() -> Storage {
+        Storage::open_with_tz(":memory:", 0, "+0 hours".to_string()).unwrap()
+    }
+
+    #[test]
+    fn snapshot_flags_revoked_keys_as_deleted() {
+        let s = test_storage();
+        s.record("hash-alice", "alice", "gpt", 10, 5);
+        s.record("hash-bob", "bob", "gpt", 3, 1);
+
+        // Only alice still exists; bob was revoked.
+        let active: HashSet<String> = ["hash-alice".into()].into_iter().collect();
+        let rows = s.snapshot(&active);
+
+        assert_eq!(rows.len(), 2);
+        let by_name = |n: &str| rows.iter().find(|r| r.key_name == n).unwrap();
+        assert!(
+            !by_name("alice").deleted,
+            "existing key must not be deleted"
+        );
+        assert!(
+            by_name("bob").deleted,
+            "revoked key must be flagged deleted"
+        );
+    }
+
+    #[test]
+    fn snapshot_flags_all_deleted_when_none_active() {
+        let s = test_storage();
+        s.record("hash-alice", "alice", "gpt", 10, 5);
+
+        let active: HashSet<String> = HashSet::new();
+        let rows = s.snapshot(&active);
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].deleted);
+    }
+
+    #[test]
+    fn timeline_keeps_and_flags_revoked_keys() {
+        let s = test_storage();
+        s.record("hash-alice", "alice", "gpt", 10, 5);
+        s.record("hash-bob", "bob", "gpt", 3, 1);
+
+        let active: HashSet<String> = ["hash-alice".into()].into_iter().collect();
+        let buckets = s.timeline("1d", &active);
+
+        // Both keys must still appear in the chart, bob flagged deleted.
+        let mut saw_alice = false;
+        let mut saw_bob = false;
+        for b in &buckets {
+            for k in &b.keys {
+                match k.key_name.as_str() {
+                    "alice" => {
+                        saw_alice = true;
+                        assert!(!k.deleted);
+                    }
+                    "bob" => {
+                        saw_bob = true;
+                        assert!(k.deleted);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_alice, "active key missing from timeline");
+        assert!(saw_bob, "revoked key must stay visible in timeline");
+    }
 }

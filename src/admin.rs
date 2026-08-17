@@ -157,6 +157,9 @@ fn process_request(
             Ok(None) => AdminResponse::Error(format!("key not found: {target}")),
             Err(e) => AdminResponse::Error(e),
         },
-        AdminRequest::GetStats => AdminResponse::Stats(tracker.snapshot()),
+        AdminRequest::GetStats => match km.active_hashes() {
+            Ok(active) => AdminResponse::Stats(tracker.snapshot(&active)),
+            Err(e) => AdminResponse::Error(e),
+        },
     }
 }

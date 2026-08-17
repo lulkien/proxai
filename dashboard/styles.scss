@@ -153,6 +153,9 @@ h2 {
   transition: opacity .1s;
 
   &:hover { opacity: .75; }
+
+  // Revoked keys stay visible in history but are dimmed.
+  &.deleted { opacity: .4; }
 }
 
 .chart-label {
@@ -160,28 +163,6 @@ h2 {
   color: #8b949e;
   margin-top: 6px;
   white-space: nowrap;
-}
-
-.chart-legend {
-  display: flex;
-  gap: .75rem;
-  margin-top: .5rem;
-  flex-wrap: wrap;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: .25rem;
-  font-size: .8rem;
-  color: #8b949e;
-}
-
-.legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  flex-shrink: 0;
 }
 
 .chart-tooltip {
@@ -228,6 +209,12 @@ th {
 td { font-size: .875rem; }
 
 .key-name { color: #58a6ff; }
+
+.deleted-mark {
+  color: #8b949e;
+  font-size: .8em;
+  font-weight: 400;
+}
 
 // ── Model badges ──
 

@@ -1,7 +1,7 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{path::Path, sync::Mutex};
+use std::{collections::HashSet, path::Path, sync::Mutex};
 
 const KEY_ID_LEN: usize = 4;
 const KEY_STEM_LEN: usize = 32;
@@ -181,6 +181,24 @@ impl KeyManager {
             }
             None => Ok(None),
         }
+    }
+
+    /// Hashes of all keys that currently exist (i.e. not revoked).
+    /// Used to distinguish active keys from deleted ones in usage stats,
+    /// since usage rows are kept after a key is revoked.
+    pub fn active_hashes(&self) -> Result<HashSet<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT hash FROM keys")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("query: {e}"))?;
+        let mut active = HashSet::new();
+        for hash in rows.flatten() {
+            active.insert(hash);
+        }
+        Ok(active)
     }
 
     /// List all keys.

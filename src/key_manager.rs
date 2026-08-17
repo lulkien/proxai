@@ -23,12 +23,21 @@ pub struct KeyInfo {
 
 pub struct KeyManager {
     conn: Mutex<rusqlite::Connection>,
+    tz_offset_secs: i32,
 }
 
 impl KeyManager {
     /// Open (or create) keys.db at the given path. Migrates from keys.json
     /// automatically if the db is empty and keys.json exists.
     pub fn open(path: &str) -> Result<Self, String> {
+        Self::open_with_tz(path, 0)
+    }
+
+    /// Open with a fixed timezone offset (in seconds) applied to `created_at`
+    /// timestamps. The server passes the configured `timezone` offset so key
+    /// timestamps and usage timestamps share one source of truth; offline
+    /// callers default to UTC.
+    pub fn open_with_tz(path: &str, tz_offset_secs: i32) -> Result<Self, String> {
         let conn = rusqlite::Connection::open(path).map_err(|e| format!("open {path}: {e}"))?;
 
         conn.execute_batch(
@@ -47,6 +56,7 @@ impl KeyManager {
 
         let km = Self {
             conn: Mutex::new(conn),
+            tz_offset_secs,
         };
 
         // Auto-migrate from keys.json if db is empty
@@ -137,7 +147,7 @@ impl KeyManager {
             .rev()
             .collect();
 
-        let created_at = chrono_now();
+        let created_at = chrono_now(self.tz_offset_secs);
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -223,35 +233,12 @@ impl KeyManager {
     }
 }
 
-/// Simple ISO-8601 timestamp without pulling in chrono crate.
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let t = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = t.as_secs();
-    let offset_secs = 7 * 3600;
-    let local = secs + offset_secs;
-    let days = local / 86400;
-    let rem = local % 86400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let s = rem % 60;
-
-    let (y, mo, d) = days_to_ymd(days);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}+07:00")
-}
-
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+/// ISO-8601 timestamp in the configured fixed offset (e.g. "2026-08-17T10:30:00+07:00").
+/// Falls back to UTC if the offset is out of range.
+fn chrono_now(offset_secs: i32) -> String {
+    let tz = chrono::FixedOffset::east_opt(offset_secs)
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+    chrono::Utc::now()
+        .with_timezone(&tz)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

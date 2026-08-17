@@ -51,7 +51,8 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         .build()?;
 
     let models = discover_models(&client, &config).await;
-    let km = Arc::new(KeyManager::open(key_db).map_err(ProxyError::Internal)?);
+    let (tz_secs, tz_sql) = config.timezone_offset();
+    let km = Arc::new(KeyManager::open_with_tz(key_db, tz_secs).map_err(ProxyError::Internal)?);
 
     match km.list() {
         Ok(keys) if keys.is_empty() => {
@@ -68,11 +69,8 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         .db_path
         .clone()
         .unwrap_or_else(|| "proxai.db".to_string());
-    let (tz_secs, tz_sql) = config.timezone_offset();
-    let storage = Arc::new(
-        Storage::open_with_tz(&db_path, tz_secs, tz_sql)
-            .map_err(ProxyError::Internal)?,
-    );
+    let storage =
+        Arc::new(Storage::open_with_tz(&db_path, tz_secs, tz_sql).map_err(ProxyError::Internal)?);
     let tracker = Arc::new(UsageTracker::new(storage));
 
     // Spawn Unix socket admin server

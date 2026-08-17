@@ -138,3 +138,34 @@ fn internal_error(msg: &str) -> Response {
     });
     (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limiter_blocks_after_twenty_failures() {
+        let rl = RateLimiter::default();
+        for _ in 0..20 {
+            assert!(
+                !rl.check("1.2.3.4").await,
+                "attempts within the limit must pass"
+            );
+        }
+        assert!(
+            rl.check("1.2.3.4").await,
+            "the 21st attempt must be blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_reset_clears_failures() {
+        let rl = RateLimiter::default();
+        for _ in 0..20 {
+            rl.check("5.6.7.8").await;
+        }
+        assert!(rl.check("5.6.7.8").await, "should be blocked before reset");
+        rl.reset("5.6.7.8").await;
+        assert!(!rl.check("5.6.7.8").await, "should be allowed after reset");
+    }
+}

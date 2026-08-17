@@ -60,3 +60,45 @@ impl Config {
         (secs, sql)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_tz(tz: &str) -> Config {
+        Config {
+            bind: "127.0.0.1:3000".parse().unwrap(),
+            providers: vec![],
+            dashboard_password: None,
+            db_path: None,
+            timezone: tz.to_string(),
+        }
+    }
+
+    #[test]
+    fn timezone_offset_positive() {
+        let (secs, sql) = config_with_tz("+07:00").timezone_offset();
+        assert_eq!(secs, 7 * 3600);
+        assert_eq!(sql, "+7 hours");
+    }
+
+    #[test]
+    fn timezone_offset_negative_with_minutes() {
+        let (secs, sql) = config_with_tz("-05:30").timezone_offset();
+        assert_eq!(secs, -(5 * 3600 + 30 * 60));
+        assert_eq!(sql, "-5 hours");
+    }
+
+    #[test]
+    fn timezone_offset_utc() {
+        let (secs, _) = config_with_tz("+00:00").timezone_offset();
+        assert_eq!(secs, 0);
+    }
+
+    #[test]
+    fn timezone_offset_named_zone_falls_back_to_zero() {
+        // Named IANA zones are unsupported; parsing must not panic.
+        let (secs, _) = config_with_tz("Asia/Ho_Chi_Minh").timezone_offset();
+        assert_eq!(secs, 0);
+    }
+}

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use serde_json::Value;
 use tracing::{error, info};
 
-use crate::server::{ModelEntry, ModelList};
+use crate::server::{ModelEntry, ModelList, strip_provider_prefix};
 
 pub async fn list_models(State(state): State<ProxyState>) -> impl IntoResponse {
     let data: Vec<ModelEntry> = state
@@ -62,9 +62,8 @@ pub async fn chat_completions(
     };
 
     // Strip namespace prefix for upstream (deepseek/gpt-4o -> gpt-4o)
-    let prefix = format!("{}/", provider.name);
-    let upstream_model = model.strip_prefix(&prefix).unwrap_or(&model);
-    if upstream_model != model {
+    let upstream_model = strip_provider_prefix(&model, &provider.name);
+    if upstream_model != model.as_str() {
         body_json
             .as_object_mut()
             .unwrap()

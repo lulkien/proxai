@@ -42,6 +42,19 @@ pub struct ModelList {
     pub data: Vec<ModelEntry>,
 }
 
+/// Build the namespaced model id used internally: "provider/model".
+/// Namespacing avoids collisions when two providers expose the same model id.
+pub fn namespace_model(provider: &str, model: &str) -> String {
+    format!("{provider}/{model}")
+}
+
+/// Strip the "provider/" prefix from a namespaced model id, if present.
+/// Returns the model id unchanged when it has no provider prefix.
+pub fn strip_provider_prefix<'a>(model: &'a str, provider: &str) -> &'a str {
+    let prefix = format!("{provider}/");
+    model.strip_prefix(&prefix).unwrap_or(model)
+}
+
 pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result<()> {
     let config =
         Arc::new(Config::load(config_path).map_err(|e| ProxyError::ConfigError(e.to_string()))?);
@@ -219,7 +232,7 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
                             if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
                                 for entry in data {
                                     if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
-                                        let namespaced = format!("{}/{}", provider.name, id);
+                                        let namespaced = namespace_model(&provider.name, id);
                                         info!("  + {namespaced}");
                                         map.insert(namespaced, provider.name.clone());
                                     }
@@ -254,4 +267,43 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
     }
 
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespace_model_prepends_provider() {
+        assert_eq!(
+            namespace_model("deepseek", "deepseek-chat"),
+            "deepseek/deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn strip_provider_prefix_removes_provider() {
+        assert_eq!(
+            strip_provider_prefix("deepseek/deepseek-chat", "deepseek"),
+            "deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn strip_provider_prefix_keeps_unprefixed_model() {
+        assert_eq!(
+            strip_provider_prefix("deepseek-chat", "deepseek"),
+            "deepseek-chat"
+        );
+    }
+
+    #[test]
+    fn strip_provider_prefix_does_not_false_match_prefix() {
+        // "deep" is a prefix of "deepseek"; a shorter provider name must not
+        // strip the wrong prefix.
+        assert_eq!(
+            strip_provider_prefix("deepseek/deepseek-chat", "deep"),
+            "deepseek/deepseek-chat"
+        );
+    }
 }

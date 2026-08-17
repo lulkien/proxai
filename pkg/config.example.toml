@@ -11,9 +11,15 @@ bind = "127.0.0.1:3000"
 
 # Add providers here. Example:
 #
+# DeepSeek (OpenAI-compatible). Base URL no longer uses /v1.
+# Models: deepseek-v4-flash, deepseek-v4-pro.
+# DeepSeek also offers an Anthropic-format endpoint at
+# https://api.deepseek.com/anthropic; proxai routes the
+# OpenAI-compatible endpoint below.
+#
 # [[providers]]
 # name = "deepseek"
-# url = "https://api.deepseek.com/v1"
+# url = "https://api.deepseek.com"
 # api_key = "«redacted:sk-…»"
 #
 # [[providers]]

@@ -32,7 +32,7 @@ vim config.toml
 curl http://127.0.0.1:3000/v1/chat/completions \
   -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 Dashboard at `http://127.0.0.1:3000/dashboard`.
@@ -51,7 +51,7 @@ bind = "127.0.0.1:3000"
 
 [[providers]]
 name = "deepseek"
-url = "https://api.deepseek.com/v1"
+url = "https://api.deepseek.com"
 api_key = "sk-..."
 ```
 

@@ -24,7 +24,7 @@ fn default_timezone() -> String {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Provider {
     pub name: String,
-    /// Base URL, e.g. https://api.deepseek.com/v1
+    /// Base URL, e.g. https://api.deepseek.com
     pub url: String,
     pub api_key: String,
 }

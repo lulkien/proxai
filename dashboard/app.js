@@ -2,6 +2,14 @@ const API = '/dashboard/api';
 
 function fmtNum(n) { return n.toLocaleString('en'); }
 
+// Escape HTML-special characters so user-controlled strings (key names,
+// model names) can't inject markup when interpolated into innerHTML.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
 async function fetchJSON(url, opts) {
   const res = await fetch(url, opts);
   const data = await res.json();
@@ -35,10 +43,10 @@ async function loadUsage() {
 function renderUsage(data, total) {
   let rows = data.keys.map(k => {
     let badges = Object.entries(k.model_usage).map(([m, u]) =>
-      '<span class="model-badge">' + m + ': ' + fmtNum(u.requests) + ' req</span>'
+      '<span class="model-badge">' + esc(m) + ': ' + fmtNum(u.requests) + ' req</span>'
     ).join('');
     return '<tr class="usage-row" onclick="let d=this.nextElementSibling;if(d)d.classList.toggle(\'show\');let i=this.querySelector(\'.toggle-icon\');if(i)i.classList.toggle(\'open\')">'
-      + '<td class="key-name">' + (data.keys.length > 1 ? '<span class="toggle-icon">\u25b6</span> ' : '') + k.key_name + '</td>'
+      + '<td class="key-name">' + (data.keys.length > 1 ? '<span class="toggle-icon">\u25b6</span> ' : '') + esc(k.key_name) + '</td>'
       + '<td>' + fmtNum(k.total_requests) + '</td>'
       + '<td>' + (k.last_used || 'never') + '</td>'
       + '</tr>'
@@ -121,7 +129,7 @@ function renderChart(buckets, range) {
       var k = b.keys[j];
       var pct = total > 0 ? (k.requests / total) * 100 : 0;
       segments += '<div class="chart-segment" style="height:' + pct.toFixed(1) + '%;background:' + getColor(k.key_name)
-        + '" data-tip="' + k.key_name + ': ' + fmtNum(k.requests) + ' req"></div>';
+        + '" data-tip="' + esc(k.key_name) + ': ' + fmtNum(k.requests) + ' req"></div>';
     }
 
     var label = range === '1d' ? b.time.slice(11) : b.time.slice(5);
@@ -134,7 +142,7 @@ function renderChart(buckets, range) {
   var legend = '';
   var names = Object.keys(colorMap);
   for (var i = 0; i < names.length; i++) {
-    legend += '<span class="legend-item"><span class="legend-dot" style="background:' + colorMap[names[i]] + '"></span>' + names[i] + '</span>';
+    legend += '<span class="legend-item"><span class="legend-dot" style="background:' + colorMap[names[i]] + '"></span>' + esc(names[i]) + '</span>';
   }
 
   wrap.innerHTML = '<div class="chart-bars">' + bars + '</div>'
@@ -194,10 +202,10 @@ function renderKeyList(keys) {
   el.innerHTML = '<table><thead><tr><th>ID</th><th>Name</th><th>Partial</th><th>Created</th><th></th></tr></thead><tbody>'
     + keys.map(k => '<tr>'
       + '<td>' + k.id + '</td>'
-      + '<td class="key-name">' + k.name + '</td>'
-      + '<td>' + k.partial + '</td>'
-      + '<td>' + k.created_at + '</td>'
-      + '<td><button class="btn-danger" onclick="revokeKey(\'' + k.name + '\')">Revoke</button></td>'
+      + '<td class="key-name">' + esc(k.name) + '</td>'
+      + '<td>' + esc(k.partial) + '</td>'
+      + '<td>' + esc(k.created_at) + '</td>'
+      + '<td><button class="btn-danger" data-id="' + k.id + '" data-name="' + esc(k.name) + '" onclick="revokeKeyFromBtn(this)">Revoke</button></td>'
       + '</tr>').join('')
     + '</tbody></table>';
 }
@@ -229,7 +237,7 @@ function showKeyModal(key) {
   overlay.innerHTML =
     '<div class="modal-box" onclick="event.stopPropagation()">'
     + '<p style="color:#3fb950;font-weight:600;margin-bottom:.75rem">API key generated (shown once!)</p>'
-    + '<input class="key-display" value="' + key + '" readonly onclick="this.select()" style="width:100%;background:#0d1117;border:1px solid #58a6ff;padding:.5rem .75rem;border-radius:6px;font-family:monospace;font-size:.8rem;margin-bottom:1rem">'
+    + '<input class="key-display" value="' + esc(key) + '" readonly onclick="this.select()" style="width:100%;background:#0d1117;border:1px solid #58a6ff;padding:.5rem .75rem;border-radius:6px;font-family:monospace;font-size:.8rem;margin-bottom:1rem">'
     + '<div class="modal-actions">'
     + '<button class="btn-sm" id="modal-copy">Copy</button>'
     + '<button class="btn-sm" id="modal-close" style="background:#da3633;border:none;color:#fff">Close</button>'
@@ -253,13 +261,15 @@ function closeKeyModal() {
   if (m) m.remove();
 }
 
-async function revokeKey(target) {
-  if (!confirm('Revoke key "' + target + '"? This cannot be undone.')) return;
+async function revokeKeyFromBtn(btn) {
+  var id = btn.getAttribute('data-id');
+  var name = btn.getAttribute('data-name');
+  if (!confirm('Revoke key "' + name + '"? This cannot be undone.')) return;
   try {
     await fetchJSON(API + '/keys/revoke', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target: target })
+      body: JSON.stringify({ target: id })
     });
     loadKeyList();
   } catch (e) {

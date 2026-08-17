@@ -73,12 +73,17 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         Arc::new(Storage::open_with_tz(&db_path, tz_secs, tz_sql).map_err(ProxyError::Internal)?);
     let tracker = Arc::new(UsageTracker::new(storage));
 
-    // Spawn Unix socket admin server
+    // Bind the admin Unix socket up front so a bind failure aborts startup
+    // (rather than silently losing admin capability).
+    let admin_socket = socket_path.to_string();
+    let admin_listener = crate::admin::bind(&admin_socket).map_err(|e| {
+        ProxyError::Internal(format!("failed to bind admin socket {admin_socket}: {e}"))
+    })?;
+
     let admin_km = km.clone();
     let admin_tracker = tracker.clone();
-    let admin_socket = socket_path.to_string();
     tokio::spawn(async move {
-        crate::admin::run(&admin_socket, admin_km, admin_tracker).await;
+        crate::admin::run(admin_listener, admin_km, admin_tracker).await;
     });
 
     let state = ProxyState {

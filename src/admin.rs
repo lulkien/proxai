@@ -39,21 +39,30 @@ pub enum AdminResponse {
     Error(String),
 }
 
-/// Run the Unix socket admin server. Blocks until error.
-pub async fn run(socket_path: &str, key_manager: Arc<KeyManager>, tracker: Arc<UsageTracker>) {
+/// Bind the admin socket, removing any stale socket first and restricting
+/// access to the owner (0600). Returns the bound listener so the caller can
+/// abort startup if binding fails.
+pub fn bind(socket_path: &str) -> std::io::Result<UnixListener> {
     // Remove stale socket if it exists
     let _ = std::fs::remove_file(socket_path);
 
-    let listener = match UnixListener::bind(socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind admin socket {socket_path}: {e}");
-            return;
-        }
-    };
+    let listener = UnixListener::bind(socket_path)?;
 
-    info!("Admin socket listening on {socket_path}");
+    // Only the owner may connect; keeps the unauthenticated RPC channel
+    // off multi-user hosts.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
 
+    info!("Admin socket listening on {socket_path} (mode 0600)");
+
+    Ok(listener)
+}
+
+/// Run the Unix socket admin server on an already-bound listener. Blocks until error.
+pub async fn run(listener: UnixListener, key_manager: Arc<KeyManager>, tracker: Arc<UsageTracker>) {
     loop {
         match listener.accept().await {
             Ok((mut stream, _)) => {

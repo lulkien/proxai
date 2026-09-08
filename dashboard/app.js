@@ -43,9 +43,22 @@ async function loadUsage() {
 function renderUsage(data, total) {
   let activeKeys = data.keys.filter(k => !k.deleted).length;
   let rows = data.keys.map(k => {
-    let badges = Object.entries(k.model_usage).map(([m, u]) =>
+    // Per-model breakdown: show the 3 most-used models, merge the rest
+    // into an "other" badge. Sort by requests desc (name as tie-break so
+    // the pick is deterministic).
+    let usage = Object.entries(k.model_usage).sort((a, b) =>
+      b[1].requests - a[1].requests || a[0].localeCompare(b[0]));
+    let top = usage.slice(0, 3);
+    let rest = usage.slice(3);
+    let badges = top.map(([m, u]) =>
       '<span class="model-badge">' + esc(m) + ': ' + fmtNum(u.requests) + ' req</span>'
     ).join('');
+    if (rest.length > 0) {
+      let otherReq = rest.reduce((s, [, u]) => s + u.requests, 0);
+      let otherModels = rest.map(([m]) => m).join(', ');
+      badges += '<span class="model-badge" title="' + esc(otherModels) + '">other: '
+        + fmtNum(otherReq) + ' req</span>';
+    }
     let nameCell = esc(k.key_name)
       + (k.deleted ? ' <span class="deleted-mark">(deleted)</span>' : '');
     return '<tr class="usage-row" onclick="let d=this.nextElementSibling;if(d)d.classList.toggle(\'show\');let i=this.querySelector(\'.toggle-icon\');if(i)i.classList.toggle(\'open\')">'

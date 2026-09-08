@@ -75,9 +75,13 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 `Mutex<Connection>`):
 
 - **keys.db** (`--key`, default `keys.db`): `keys(id, name, hash, prefix,
-  suffix, created_at)`. `hash` = SHA-256 hex of the full `sk-` key;
-  `prefix`/`suffix` are 6-char/4-char display fragments. Plaintext keys are
-  printed **exactly once** at generation and never stored or logged.
+  suffix, created_at)`. `id` is a random 8-byte hex string (16 chars, TEXT
+  PRIMARY KEY) — never a sequential integer. `hash` = SHA-256 hex of the
+  full `sk-` key; `prefix`/`suffix` are 6-char/4-char display fragments.
+  Plaintext keys are printed **exactly once** at generation and never stored
+  or logged. Databases created before text ids (legacy `id INTEGER PRIMARY
+  KEY`) are rebuilt automatically on open, each row getting a fresh random
+  id.
 - **usage.db** (`config.db_path`, default `proxai.db`): one row per request
   (`key_hash, key_name, model, prompt_tokens, completion_tokens,
   created_at`), `created_at` written by SQLite `datetime('now')` (UTC) and

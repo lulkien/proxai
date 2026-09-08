@@ -74,10 +74,10 @@ pub enum KeyAction {
 }
 
 pub fn key_table(keys: &[crate::key_manager::KeyInfo]) {
-    println!("{:<4} {:<20} {:<24} CREATED", "#", "NAME", "KEY");
+    println!("{:<16} {:<20} {:<24} CREATED", "ID", "NAME", "KEY");
     for k in keys {
         println!(
-            "{:<4} {:<20} {:<24} {}",
+            "{:<16} {:<20} {:<24} {}",
             k.id, k.name, k.partial, k.created_at
         );
     }

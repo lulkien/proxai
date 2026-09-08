@@ -45,10 +45,10 @@ async fn main() -> Result<()> {
         Some(Command::Key { key, action }) => match action {
             KeyAction::Generate { name } => {
                 let km = KeyManager::open(&key).map_err(ProxyError::Internal)?;
-                let key_value = km.generate(&name).map_err(ProxyError::Internal)?;
+                let new_key = km.generate(&name).map_err(ProxyError::Internal)?;
                 println!("API key generated (save it — shown only once!):");
                 println!();
-                println!("  {key_value}");
+                println!("  {}", new_key.key);
                 println!();
                 println!("Use: Authorization: Bearer ***");
                 Ok(())

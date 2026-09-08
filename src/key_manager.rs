@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, path::Path, sync::Mutex};
 
-const KEY_ID_LEN: usize = 4;
-const KEY_STEM_LEN: usize = 32;
+const KEY_ID_BYTES: usize = 8;
+const KEY_SUFFIX_LEN: usize = 4;
 const KEY_PREFIX: &str = "sk-";
 
 /// Compute SHA-256 hex digest of a raw API key.
@@ -12,10 +12,22 @@ pub fn hash_key(raw_key: &str) -> String {
     hex::encode(Sha256::digest(raw_key.as_bytes()))
 }
 
+/// A freshly generated key: plaintext `key` plus the metadata persisted
+/// alongside it. Returned from a single locked section so callers never
+/// have to re-query to find the row they just inserted.
+#[derive(Debug)]
+pub struct NewKey {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+    pub partial: String,
+    pub created_at: String,
+}
+
 /// Information shown by list-keys. Does not contain the full key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyInfo {
-    pub id: u64,
+    pub id: String,
     pub name: String,
     pub partial: String,
     pub created_at: String,
@@ -44,7 +56,7 @@ impl KeyManager {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              CREATE TABLE IF NOT EXISTS keys (
-                 id INTEGER PRIMARY KEY,
+                 id TEXT PRIMARY KEY NOT NULL,
                  name TEXT NOT NULL,
                  hash TEXT NOT NULL UNIQUE,
                  prefix TEXT NOT NULL,
@@ -53,6 +65,8 @@ impl KeyManager {
              );",
         )
         .map_err(|e| format!("migrate: {e}"))?;
+
+        migrate_legacy_integer_ids(&conn)?;
 
         let km = Self {
             conn: Mutex::new(conn),
@@ -95,7 +109,13 @@ impl KeyManager {
 
         let mut imported = 0;
         for entry in keys {
-            let id = entry.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Legacy keys.json had sequential integer ids; ignore them and
+            // assign a fresh random text id per migrated key.
+            let id = {
+                let mut id_raw = [0u8; KEY_ID_BYTES];
+                rand::thread_rng().fill(&mut id_raw);
+                hex::encode(id_raw)
+            };
             let name = entry
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -128,9 +148,10 @@ impl KeyManager {
         Ok(())
     }
 
-    /// Generate a new API key, returns the plaintext ONCE.
-    pub fn generate(&self, name: &str) -> Result<String, String> {
-        let mut raw = [0u8; KEY_STEM_LEN];
+    /// Generate a new API key, returns the plaintext ONCE alongside the
+    /// persisted metadata (random text id, partial, created_at).
+    pub fn generate(&self, name: &str) -> Result<NewKey, String> {
+        let mut raw = [0u8; 32];
         rand::thread_rng().fill(&mut raw);
         let stem = hex::encode(raw);
         let full_key = format!("{KEY_PREFIX}{stem}");
@@ -141,35 +162,47 @@ impl KeyManager {
         let suffix: String = full_key
             .chars()
             .rev()
-            .take(KEY_ID_LEN)
+            .take(KEY_SUFFIX_LEN)
             .collect::<String>()
             .chars()
             .rev()
             .collect();
 
+        // Random 8-byte id (16 hex chars): non-sequential, no key-count
+        // leakage, collision odds negligible at this scale.
+        let mut id_raw = [0u8; KEY_ID_BYTES];
+        rand::thread_rng().fill(&mut id_raw);
+        let id = hex::encode(id_raw);
+
         let created_at = chrono_now(self.tz_offset_secs);
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO keys (name, hash, prefix, suffix, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![name, hash, prefix, suffix, created_at],
+            "INSERT INTO keys (id, name, hash, prefix, suffix, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, name, hash, prefix, suffix, created_at],
         )
         .map_err(|e| format!("insert key: {e}"))?;
 
-        Ok(full_key)
+        Ok(NewKey {
+            id,
+            name: name.to_string(),
+            key: full_key,
+            partial: format!("{prefix}…{suffix}"),
+            created_at,
+        })
     }
 
     /// Revoke a key by name or id. Returns (id, name) of revoked key, or None.
-    pub fn revoke(&self, target: &str) -> Result<Option<(u64, String)>, String> {
+    pub fn revoke(&self, target: &str) -> Result<Option<(String, String)>, String> {
         let conn = self.conn.lock().unwrap();
 
         // Find the key first
         let row = conn
             .query_row(
-                "SELECT id, name FROM keys WHERE name = ?1 OR CAST(id AS TEXT) = ?1",
+                "SELECT id, name FROM keys WHERE name = ?1 OR id = ?1",
                 rusqlite::params![target],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .ok();
 
@@ -177,7 +210,7 @@ impl KeyManager {
             Some((id, name)) => {
                 conn.execute("DELETE FROM keys WHERE id = ?1", rusqlite::params![id])
                     .map_err(|e| format!("delete key: {e}"))?;
-                Ok(Some((id as u64, name)))
+                Ok(Some((id, name)))
             }
             None => Ok(None),
         }
@@ -201,17 +234,17 @@ impl KeyManager {
         Ok(active)
     }
 
-    /// List all keys.
+    /// List all keys, oldest first.
     pub fn list(&self) -> Result<Vec<KeyInfo>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, name, prefix, suffix, created_at FROM keys ORDER BY id")
+            .prepare("SELECT id, name, prefix, suffix, created_at FROM keys ORDER BY rowid")
             .map_err(|e| format!("prepare: {e}"))?;
 
         let rows = stmt
             .query_map([], |r| {
                 Ok(KeyInfo {
-                    id: r.get::<_, i64>(0)? as u64,
+                    id: r.get(0)?,
                     name: r.get(1)?,
                     partial: format!("{}…{}", r.get::<_, String>(2)?, r.get::<_, String>(3)?),
                     created_at: r.get(4)?,
@@ -219,8 +252,7 @@ impl KeyManager {
             })
             .map_err(|e| format!("query: {e}"))?;
 
-        let mut keys: Vec<KeyInfo> = rows.filter_map(|r| r.ok()).collect();
-        keys.sort_by_key(|k| k.id);
+        let keys: Vec<KeyInfo> = rows.filter_map(|r| r.ok()).collect();
         Ok(keys)
     }
 
@@ -251,6 +283,42 @@ impl KeyManager {
     }
 }
 
+/// Rebuild `keys` when it still uses the pre-uuid `id INTEGER PRIMARY KEY`
+/// schema, backfilling a random 8-byte hex id per row. Runs once on open of
+/// a legacy database; new databases already use TEXT ids and are untouched.
+fn migrate_legacy_integer_ids(conn: &rusqlite::Connection) -> Result<(), String> {
+    let id_type: Option<String> = conn
+        .prepare("SELECT type FROM pragma_table_info('keys') WHERE name = 'id'")
+        .map_err(|e| format!("schema check: {e}"))?
+        .query_row([], |r| r.get(0))
+        .ok();
+
+    if id_type.as_deref() != Some("INTEGER") {
+        return Ok(());
+    }
+
+    tracing::info!("keys table uses legacy integer ids — migrating to random text ids");
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE keys RENAME TO keys_old;
+         CREATE TABLE keys (
+             id TEXT PRIMARY KEY NOT NULL,
+             name TEXT NOT NULL,
+             hash TEXT NOT NULL UNIQUE,
+             prefix TEXT NOT NULL,
+             suffix TEXT NOT NULL,
+             created_at TEXT NOT NULL
+         );
+         INSERT INTO keys (id, name, hash, prefix, suffix, created_at)
+             SELECT lower(hex(randomblob(8))), name, hash, prefix, suffix, created_at
+             FROM keys_old;
+         DROP TABLE keys_old;
+         COMMIT;",
+    )
+    .map_err(|e| format!("migrate integer ids: {e}"))?;
+    Ok(())
+}
+
 /// ISO-8601 timestamp in the configured fixed offset (e.g. "2026-08-17T10:30:00+07:00").
 /// Falls back to UTC if the offset is out of range.
 fn chrono_now(offset_secs: i32) -> String {
@@ -259,4 +327,93 @@ fn chrono_now(offset_secs: i32) -> String {
     chrono::Utc::now()
         .with_timezone(&tz)
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_hex16(s: &str) -> bool {
+        s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn generate_returns_random_text_ids() {
+        let km = KeyManager::open(":memory:").unwrap();
+        let alice = km.generate("alice").unwrap();
+        let bob = km.generate("bob").unwrap();
+
+        assert!(is_hex16(&alice.id), "id must be 16 hex chars");
+        assert!(is_hex16(&bob.id));
+        assert_ne!(alice.id, bob.id, "ids must not repeat");
+        assert!(alice.key.starts_with("sk-"));
+
+        // List preserves insertion order and carries the same ids.
+        let keys = km.list().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].id, alice.id);
+        assert_eq!(keys[1].id, bob.id);
+
+        // Revoke by the text id works and returns it.
+        let revoked = km.revoke(&alice.id).unwrap();
+        assert_eq!(revoked, Some((alice.id.clone(), "alice".to_string())));
+        assert!(!km.validate(&alice.key).unwrap());
+        assert!(km.validate(&bob.key).unwrap());
+    }
+
+    #[test]
+    fn revoke_by_name_still_works() {
+        let km = KeyManager::open(":memory:").unwrap();
+        let key = km.generate("carol").unwrap();
+        let revoked = km.revoke("carol").unwrap();
+        assert_eq!(revoked, Some((key.id.clone(), "carol".to_string())));
+    }
+
+    #[test]
+    fn legacy_integer_id_db_migrates_to_text_ids() {
+        let raw = "sk-legacy-raw-key-for-test";
+        let path =
+            std::env::temp_dir().join(format!("proxai-km-legacy-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // Build a database with the old INTEGER id schema.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE keys (
+                     id INTEGER PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     hash TEXT NOT NULL UNIQUE,
+                     prefix TEXT NOT NULL,
+                     suffix TEXT NOT NULL,
+                     created_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO keys (name, hash, prefix, suffix, created_at)
+                     VALUES ('legacy', ?1, 'sk-abc', 'wxyz', '2020-01-01T00:00:00+00:00')",
+                rusqlite::params![hash_key(raw)],
+            )
+            .unwrap();
+        }
+
+        // Opening migrates: integer ids become random 16-hex text ids.
+        let path_str = path.to_str().unwrap();
+        let km = KeyManager::open_with_tz(path_str, 0).unwrap();
+        let keys = km.list().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(is_hex16(&keys[0].id));
+        assert_eq!(keys[0].name, "legacy");
+        assert_eq!(keys[0].created_at, "2020-01-01T00:00:00+00:00");
+        assert!(km.validate(raw).unwrap(), "key must survive migration");
+
+        // Reopening must not migrate twice or duplicate rows.
+        let km2 = KeyManager::open_with_tz(path_str, 0).unwrap();
+        assert_eq!(km2.list().unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}.shm", path.display()));
+    }
 }

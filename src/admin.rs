@@ -23,7 +23,7 @@ pub enum AdminRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GenerateKeyResponse {
-    pub id: u64,
+    pub id: String,
     pub name: String,
     pub key: String,
     pub partial: String,
@@ -34,7 +34,7 @@ pub struct GenerateKeyResponse {
 pub enum AdminResponse {
     KeyGenerated(GenerateKeyResponse),
     KeyList(Vec<KeyInfo>),
-    KeyRevoked { id: u64, name: String },
+    KeyRevoked { id: String, name: String },
     Stats(UsageSnapshot),
     Error(String),
 }
@@ -127,25 +127,13 @@ fn process_request(
 ) -> AdminResponse {
     match request {
         AdminRequest::GenerateKey { name } => match km.generate(&name) {
-            Ok(key) => {
-                // Re-read metadata for the response
-                match km.list() {
-                    Ok(keys) => {
-                        if let Some(entry) = keys.last() {
-                            AdminResponse::KeyGenerated(GenerateKeyResponse {
-                                id: entry.id,
-                                name: entry.name.clone(),
-                                key,
-                                partial: entry.partial.clone(),
-                                created_at: entry.created_at.clone(),
-                            })
-                        } else {
-                            AdminResponse::Error("key not persisted".into())
-                        }
-                    }
-                    Err(e) => AdminResponse::Error(e),
-                }
-            }
+            Ok(new_key) => AdminResponse::KeyGenerated(GenerateKeyResponse {
+                id: new_key.id,
+                name: new_key.name,
+                key: new_key.key,
+                partial: new_key.partial,
+                created_at: new_key.created_at,
+            }),
             Err(e) => AdminResponse::Error(e),
         },
         AdminRequest::ListKeys => match km.list() {

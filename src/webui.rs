@@ -121,7 +121,7 @@ struct GenerateKeyRequest {
 
 #[derive(Debug, Serialize)]
 struct GenerateKeyResponse {
-    id: u64,
+    id: String,
     name: String,
     key: String,
     partial: String,
@@ -137,28 +137,13 @@ async fn generate_key(
         .map_err(|s| (s, Json(serde_json::json!({"error": "unauthorized"}))))?;
 
     match state.key_manager.generate(&body.name) {
-        Ok(key) => match state.key_manager.list() {
-            Ok(keys) => {
-                if let Some(entry) = keys.last() {
-                    Ok(Json(GenerateKeyResponse {
-                        id: entry.id,
-                        name: entry.name.clone(),
-                        key,
-                        partial: entry.partial.clone(),
-                        created_at: entry.created_at.clone(),
-                    }))
-                } else {
-                    Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": "key not persisted"})),
-                    ))
-                }
-            }
-            Err(e) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )),
-        },
+        Ok(new_key) => Ok(Json(GenerateKeyResponse {
+            id: new_key.id,
+            name: new_key.name,
+            key: new_key.key,
+            partial: new_key.partial,
+            created_at: new_key.created_at,
+        })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),

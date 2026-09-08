@@ -12,6 +12,11 @@ fn main() {
         std::process::exit(1);
     }
 
+    // rust-embed reads dashboard/ files at proc-macro expansion; cargo does
+    // not know that, so without rerun-if-changed lines editing an embedded
+    // file would silently ship a stale dashboard. Track every embedded file.
     println!("cargo:rerun-if-changed=dashboard/styles.scss");
     println!("cargo:rerun-if-changed=dashboard/styles.css");
+    println!("cargo:rerun-if-changed=dashboard/index.html");
+    println!("cargo:rerun-if-changed=dashboard/app.js");
 }

@@ -143,7 +143,7 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
     let addr = config.bind;
     info!("Proxy listening on {addr} (API key required)");
     info!("Dashboard at http://{addr}/dashboard");
-    info!("Admin socket: {socket_path} (local, no auth)");
+    info!("Admin socket: @{socket_path} (abstract, local, no auth)");
     info!(
         "Providers: {:?}",
         config.providers.iter().map(|p| &p.name).collect::<Vec<_>>()

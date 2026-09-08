@@ -10,8 +10,15 @@ use tokio::{
 };
 use tracing::{error, info};
 
-/// Default admin socket path.
-pub const DEFAULT_SOCKET: &str = "/tmp/proxai.sock";
+/// Default admin socket name (bound in the abstract namespace as `@proxai`).
+pub const DEFAULT_SOCKET: &str = "proxai";
+
+/// Build an abstract-namespace address for `name` (Linux). The name is used
+/// verbatim — no leading NUL — and shows up as `@name`.
+pub fn abstract_addr(name: &str) -> std::io::Result<std::os::unix::net::SocketAddr> {
+    use std::os::linux::net::SocketAddrExt;
+    std::os::unix::net::SocketAddr::from_abstract_name(name)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum AdminRequest {
@@ -39,24 +46,26 @@ pub enum AdminResponse {
     Error(String),
 }
 
-/// Bind the admin socket, removing any stale socket first and restricting
-/// access to the owner (0600). Returns the bound listener so the caller can
-/// abort startup if binding fails.
-pub fn bind(socket_path: &str) -> std::io::Result<UnixListener> {
-    // Remove stale socket if it exists
-    let _ = std::fs::remove_file(socket_path);
+/// Bind the admin listener on the abstract-namespace socket `@{name}`.
+/// Returns the bound listener so the caller can abort startup if binding
+/// fails.
+///
+/// Abstract sockets have no filesystem path: there is no stale file to
+/// remove and the kernel drops the name automatically when the listener
+/// closes. The trade-off vs. the old filesystem socket is that abstract
+/// sockets ignore file permissions — any local process that knows the name
+/// can connect, so the previous 0600 owner-only guarantee no longer applies.
+/// (Peer authorization could be restored with an SO_PEERCRED check on
+/// accept if the host ever runs untrusted local processes.)
+pub fn bind(name: &str) -> std::io::Result<UnixListener> {
+    use std::os::unix::net::UnixListener as StdUnixListener;
 
-    let listener = UnixListener::bind(socket_path)?;
+    let addr = abstract_addr(name)?;
+    let std_listener = StdUnixListener::bind_addr(&addr)?;
+    std_listener.set_nonblocking(true)?;
+    let listener = UnixListener::from_std(std_listener)?;
 
-    // Only the owner may connect; keeps the unauthenticated RPC channel
-    // off multi-user hosts.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    info!("Admin socket listening on {socket_path} (mode 0600)");
+    info!("Admin socket listening on @{name} (abstract, local)");
 
     Ok(listener)
 }

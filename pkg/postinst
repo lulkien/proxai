@@ -31,7 +31,7 @@ if [ "$1" = "configure" ] && [ -z "$2" ]; then
     echo "     sudo -u proxai proxai key --key /var/lib/proxai/keys.db generate <name>"
     echo "   or start the server and use the admin socket:"
     echo "     sudo systemctl start proxai"
-    echo "     proxai cli --socket /var/run/proxai/admin.sock generate-key <name>"
+    echo "     proxai cli --socket proxai generate-key <name>"
     echo "3. Enable the service to start on boot:"
     echo "     sudo systemctl enable proxai"
     echo

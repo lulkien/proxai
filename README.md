@@ -8,7 +8,7 @@ OpenAI-compatible API proxy with multi-provider routing, key management, and a s
 - **API key auth** -- generate and manage client API keys (SHA-256 hashed, stored in SQLite)
 - **Dynamic model discovery** -- auto-discovers models from upstream providers at startup
 - **Rate limiting** -- 20 failed auth attempts per IP in 60s returns 429
-- **Admin socket** -- Unix socket RPC for key management (no API key needed)
+- **Admin socket** -- abstract-namespace Unix socket RPC (`@proxai`) for key management (no API key needed)
 - **Usage tracking** -- per-key request counts persisted in SQLite
 - **Static dashboard** -- plain HTML dashboard at `/dashboard` with stats and key management
 
@@ -62,16 +62,16 @@ api_key = "sk-..."
 ## CLI
 
 ```
-proxai serve --config config.toml --key keys.db [--socket /tmp/proxai.sock]
+proxai serve --config config.toml --key keys.db [--socket proxai]
 
 # Key management (offline)
 proxai key --key keys.db generate <name>
 proxai key --key keys.db list
 
-# Key management (via admin socket)
-proxai cli --socket /tmp/proxai.sock generate-key <name>
-proxai cli --socket /tmp/proxai.sock list-keys
-proxai cli --socket /tmp/proxai.sock revoke-key <name-or-id>
+# Key management (via admin socket, abstract namespace @proxai)
+proxai cli --socket proxai generate-key <name>
+proxai cli --socket proxai list-keys
+proxai cli --socket proxai revoke-key <name-or-id>
 ```
 
 ## Dashboard
@@ -102,7 +102,7 @@ just all deb
 ```
 Client -> :3000/v1/* (API key auth) -> upstream provider
 Client -> :3000/dashboard/* (optional password) -> static dashboard
-Admin  -> Unix socket (local, no auth) -> key management RPC
+Admin  -> abstract @proxai (local, no auth) -> key RPC
 ```
 
 | Module | Purpose |

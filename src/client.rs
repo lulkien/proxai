@@ -64,17 +64,29 @@ pub async fn cli_revoke_key(socket_path: &str, target: &str) -> Result<()> {
 }
 
 pub async fn send_admin_request(
-    socket_path: &str,
+    socket_name: &str,
     request: &AdminRequest,
 ) -> std::result::Result<AdminResponse, ProxyError> {
     use tokio::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
-        ProxyError::Internal(format!(
-            "cannot connect to admin socket {socket_path}: {e}\n\
-             Is the server running? Start with: proxai serve --socket {socket_path}"
-        ))
-    })?;
+    // Connect to the abstract-namespace socket @name.
+    let std_stream = {
+        use std::os::unix::net::UnixStream as StdUnixStream;
+
+        let addr = crate::admin::abstract_addr(socket_name)
+            .map_err(|e| ProxyError::Internal(format!("invalid admin socket name: {e}")))?;
+        let s = StdUnixStream::connect_addr(&addr).map_err(|e| {
+            ProxyError::Internal(format!(
+                "cannot connect to admin socket @{socket_name}: {e}\n\
+                 Is the server running? Start with: proxai serve --socket {socket_name}"
+            ))
+        })?;
+        s.set_nonblocking(true)
+            .map_err(|e| ProxyError::Internal(e.to_string()))?;
+        s
+    };
+    let mut stream =
+        UnixStream::from_std(std_stream).map_err(|e| ProxyError::Internal(e.to_string()))?;
 
     let payload = bincode::serialize(request).map_err(|e| ProxyError::Internal(e.to_string()))?;
     let len = (payload.len() as u32).to_le_bytes();

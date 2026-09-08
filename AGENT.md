@@ -47,14 +47,14 @@ Gotchas:
 ```
 Client -> :3000/v1/*       (Bearer API key, 20 fails/IP/60s -> 429) -> upstream provider
 Client -> :3000/dashboard  (optional Bearer dashboard_password)     -> static assets + JSON API
-Admin  -> Unix socket      (mode 0600, owner only, NO auth)          -> key RPC
+Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 ```
 
 ### Module map (src/)
 
 | Module | Responsibility |
 |---|---|
-| `main.rs` | mod decls, tracing init (`proxai=info` default), clap dispatch. No subcommand = `serve config.toml keys.db /tmp/proxai.sock`. |
+| `main.rs` | mod decls, tracing init (`proxai=info` default), clap dispatch. No subcommand = `serve config.toml keys.db proxai` (@proxai). |
 | `server.rs` | `ProxyState` (reqwest Client, Arc<Config>, Arc<HashMap<model_id, provider>>, Arc<UsageTracker>), axum router, model discovery, embedded-asset serving, MIME mapping. |
 | `handlers.rs` | `list_models`, `chat_completions` (streaming + non-streaming paths). |
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
@@ -109,12 +109,18 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    then parses the final `usage` chunk with `sse_usage_tokens`. Status,
    `content-type`, and `transfer-encoding` are passed through; the client
    body must stay byte-transparent.
-4. **Admin socket is unauthenticated** — access control is filesystem mode
-   0600 + local-only. Never add auth-optional remote exposure. `bind()`
-   removes a stale socket first and the server **aborts startup** if binding
-   fails. Framing: 4-byte little-endian u32 length + bincode payload, max
-   request 1 MiB. Dev default `/tmp/proxai.sock`; the systemd unit uses
-   `/var/run/proxai/admin.sock`.
+4. **Admin socket is unauthenticated** — it lives in the Linux abstract
+   namespace as `@proxai` (default; override with `--socket <name>`).
+   Abstract sockets have no filesystem path, so there is no stale-file
+   cleanup and no 0600-style permission model: any local process that
+   knows the name can connect. Never add auth-optional remote exposure.
+   (If the host runs untrusted local processes, restore peer authorization
+   with an SO_PEERCRED check on accept.) Bind pattern mirrors the sgc
+   daemon: `SocketAddrExt::from_abstract_name` -> std `bind_addr` ->
+   `set_nonblocking` -> tokio `UnixListener::from_std` (client side does
+   the same with `connect_addr`). Framing: 4-byte little-endian u32 length
+   + bincode payload, max request 1 MiB. The systemd unit passes
+   `--socket proxai`.
 5. **Dashboard auth is optional and plaintext.** `dashboard_password` unset =
    open dashboard. It is compared with `==` against the Bearer token — no
    constant-time compare, acceptable because this is a convenience gate, not

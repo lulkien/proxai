@@ -20,14 +20,14 @@ pub enum Command {
         #[arg(long, default_value = "keys.db")]
         key: String,
 
-        /// Path to admin Unix socket
+        /// Abstract admin socket name (shown as @name)
         #[arg(long, default_value = crate::admin::DEFAULT_SOCKET)]
         socket: String,
     },
 
-    /// Client for admin operations over Unix socket
+    /// Client for admin operations over the abstract socket
     Cli {
-        /// Path to admin Unix socket
+        /// Abstract admin socket name (shown as @name)
         #[arg(long, default_value = crate::admin::DEFAULT_SOCKET)]
         socket: String,
 

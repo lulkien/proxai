@@ -12,14 +12,13 @@ WorkingDirectory=/var/lib/proxai
 ExecStart=/usr/bin/proxai serve \
     --config /etc/proxai/config.toml \
     --key /var/lib/proxai/keys.db \
-    --socket /var/run/proxai/admin.sock
-RuntimeDirectory=proxai
+    --socket proxai
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/proxai /var/run/proxai
+ReadWritePaths=/var/lib/proxai
 ReadOnlyPaths=/etc/proxai
 
 [Install]

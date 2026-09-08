@@ -8,9 +8,7 @@ fn main() {
     if !Path::new(css).exists() {
         eprintln!("error: {css} is missing.");
         eprintln!("Generate it with: just css");
-        eprintln!(
-            "  (or: grass dashboard/styles.scss dashboard/styles.css --style=compressed)"
-        );
+        eprintln!("  (or: grass dashboard/styles.scss dashboard/styles.css --style=compressed)");
         std::process::exit(1);
     }
 

@@ -28,7 +28,7 @@ static HTML/SCSS dashboard embedded in the binary.
 Everything goes through `just` (see justfile):
 
 - `just css` — compile `dashboard/styles.scss` -> `dashboard/styles.css` via
-  the **external `sass` CLI** (npm). `styles.css` is gitignored/generated.
+  grass (`cargo install grass`). `styles.css` is gitignored/generated.
 - `just server` / `just all` — `css` + `cargo build --release`.
 - `just deb` — cargo-deb package (metadata in `Cargo.toml`, scripts in `pkg/`).
 - `just check` — `cargo fmt -- --check`, `cargo clippy -- -D warnings`,

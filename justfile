@@ -5,9 +5,9 @@ set positional-arguments := false
 _default:
     @just --list
 
-# Compile SCSS to CSS
+# Compile SCSS to CSS (grass: cargo install grass)
 css:
-    sass dashboard/styles.scss dashboard/styles.css --no-source-map --style=compressed
+    grass dashboard/styles.scss dashboard/styles.css --style=compressed
 
 # Build the server binary (static dashboard embedded from dashboard/)
 server: css

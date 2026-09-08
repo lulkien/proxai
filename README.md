@@ -15,7 +15,7 @@ OpenAI-compatible API proxy with multi-provider routing, key management, and a s
 ## Quick start
 
 ```
-# Build (requires sass CLI: npm install -g sass)
+# Build (requires grass: cargo install grass)
 just all
 
 # Edit config with your provider API key
@@ -82,7 +82,7 @@ Dashboard files live in `dashboard/` and are compiled into the server binary via
 SCSS is compiled at build time by the `css` just recipe:
 
 ```
-just css           # sass dashboard/styles.scss -> dashboard/styles.css
+just css           # grass dashboard/styles.scss -> dashboard/styles.css
 just server        # compile server (embeds dashboard/)
 just deb           # package as .deb
 ```

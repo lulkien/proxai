@@ -9,7 +9,7 @@ fn main() {
         eprintln!("error: {css} is missing.");
         eprintln!("Generate it with: just css");
         eprintln!(
-            "  (or: sass dashboard/styles.scss dashboard/styles.css --no-source-map --style=compressed)"
+            "  (or: grass dashboard/styles.scss dashboard/styles.css --style=compressed)"
         );
         std::process::exit(1);
     }

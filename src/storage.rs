@@ -10,6 +10,11 @@ pub struct Storage {
     tz_sql: String,
 }
 
+/// A revoked key stays visible in usage stats (flagged `deleted`) for this
+/// many days after its last request, then drops out. Mirrors the chart's
+/// maximum range (7d). Active keys are always kept regardless of age.
+const STALE_DELETED_KEY_DAYS: i64 = 7;
+
 impl Storage {
     pub fn open_with_tz(path: &str, tz_offset_secs: i32, tz_sql: String) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open db: {e}"))?;
@@ -59,7 +64,9 @@ impl Storage {
     /// Return aggregated usage per key, with per-model breakdown.
     ///
     /// `active` holds the hashes of keys that still exist; rows for revoked
-    /// keys are kept but flagged `deleted`.
+    /// keys are kept but flagged `deleted`. Revoked keys drop out entirely
+    /// once their last request is older than `STALE_DELETED_KEY_DAYS`;
+    /// active keys are always kept (all-time totals).
     pub fn snapshot(&self, active: &HashSet<String>) -> Vec<KeyUsageRow> {
         let conn = self.conn.lock().unwrap();
 
@@ -70,7 +77,8 @@ impl Storage {
                     COUNT(*) as total_requests,
                     COALESCE(SUM(prompt_tokens), 0) as total_prompt,
                     COALESCE(SUM(completion_tokens), 0) as total_completion,
-                    datetime(MAX(created_at), '{tz}') as last_used
+                    datetime(MAX(created_at), '{tz}') as last_used,
+                    MAX(created_at) as last_used_utc
              FROM usage
              GROUP BY key_hash
              ORDER BY MAX(created_at) DESC"
@@ -86,6 +94,7 @@ impl Storage {
                     total_prompt_tokens: row.get(3)?,
                     total_completion_tokens: row.get(4)?,
                     last_used: row.get(5)?,
+                    last_used_utc: row.get(6)?,
                     models: Vec::new(),
                     deleted: false,
                 })
@@ -97,6 +106,25 @@ impl Storage {
         for row in &mut rows {
             row.deleted = !active.contains(&row.key_hash);
         }
+
+        // Revoked keys with no request within the retention window are stale:
+        // drop them so long-gone keys stop cluttering the usage table.
+        // Unparseable timestamps are kept rather than silently dropped.
+        let cutoff =
+            (chrono::Utc::now() - chrono::Duration::days(STALE_DELETED_KEY_DAYS)).naive_utc();
+        rows.retain(|row| {
+            if !row.deleted {
+                return true;
+            }
+            match row
+                .last_used_utc
+                .as_deref()
+                .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
+            {
+                Some(last) => last >= cutoff,
+                None => true,
+            }
+        });
 
         // Per-model breakdown for each key
         let mut model_stmt = conn
@@ -148,7 +176,9 @@ impl Storage {
         let tz_offset = &self.tz_sql;
         let (group_expr, since) = match range {
             "1d" => (
-                format!("strftime('%Y-%m-%dT', created_at, '{tz_offset}') || printf('%02d', (CAST(strftime('%H', created_at, '{tz_offset}') AS INTEGER) / 2) * 2)"),
+                format!(
+                    "strftime('%Y-%m-%dT', created_at, '{tz_offset}') || printf('%02d', (CAST(strftime('%H', created_at, '{tz_offset}') AS INTEGER) / 2) * 2)"
+                ),
                 "1 days",
             ),
             _ => (
@@ -206,20 +236,29 @@ impl Storage {
             "1d" => {
                 // 12 two-hour buckets ending at the current time block.
                 let cur_block = (now.hour() / 2) * 2;
-                let base = now.date_naive().and_hms_opt(cur_block, 0, 0).unwrap()
-                    .and_local_timezone(tz).unwrap();
+                let base = now
+                    .date_naive()
+                    .and_hms_opt(cur_block, 0, 0)
+                    .unwrap()
+                    .and_local_timezone(tz)
+                    .unwrap();
                 (0..12)
                     .rev()
-                    .map(|i| (base - chrono::Duration::hours(i as i64 * 2))
-                        .format("%Y-%m-%dT%H").to_string())
+                    .map(|i| {
+                        (base - chrono::Duration::hours(i as i64 * 2))
+                            .format("%Y-%m-%dT%H")
+                            .to_string()
+                    })
                     .collect()
             }
-            _ => {
-                (0..7i64)
-                    .rev()
-                    .map(|d| (now - chrono::Duration::days(d)).format("%Y-%m-%d").to_string())
-                    .collect()
-            }
+            _ => (0..7i64)
+                .rev()
+                .map(|d| {
+                    (now - chrono::Duration::days(d))
+                        .format("%Y-%m-%d")
+                        .to_string()
+                })
+                .collect(),
         };
 
         let mut padded: Vec<TimelineBucket> = Vec::new();
@@ -259,6 +298,10 @@ pub struct KeyUsageRow {
     pub total_prompt_tokens: i64,
     pub total_completion_tokens: i64,
     pub last_used: Option<String>,
+    /// Raw UTC `MAX(created_at)` of the key's usage rows (SQLite
+    /// `datetime('now')` format, no timezone shift). Used to decide whether
+    /// a revoked key is stale enough to drop from stats.
+    pub last_used_utc: Option<String>,
     pub models: Vec<ModelUsageRow>,
     /// True when the key has been revoked/deleted but usage rows remain.
     pub deleted: bool,
@@ -312,6 +355,49 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert!(rows[0].deleted);
+    }
+
+    #[test]
+    fn snapshot_drops_stale_deleted_keys() {
+        let s = test_storage();
+        // A revoked key whose last request predates the retention window
+        // (7 days) must disappear from the usage table entirely.
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO usage (key_hash, key_name, model, prompt_tokens, completion_tokens, created_at)
+                 VALUES ('hash-old', 'old', 'gpt', 1, 1, '2020-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        // A recently-active revoked key stays, still flagged deleted.
+        s.record("hash-recent", "recent", "gpt", 3, 1);
+
+        let rows = s.snapshot(&HashSet::new());
+
+        let names: Vec<&str> = rows.iter().map(|r| r.key_name.as_str()).collect();
+        assert_eq!(names, vec!["recent"], "stale deleted key must be dropped");
+        assert!(rows[0].deleted);
+    }
+
+    #[test]
+    fn snapshot_keeps_stale_active_keys() {
+        // Retention only applies to revoked keys: an existing key with old
+        // usage must still show all-time totals.
+        let s = test_storage();
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO usage (key_hash, key_name, model, prompt_tokens, completion_tokens, created_at)
+                 VALUES ('hash-alice', 'alice', 'gpt', 10, 5, '2020-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+
+        let active: HashSet<String> = ["hash-alice".into()].into_iter().collect();
+        let rows = s.snapshot(&active);
+
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].deleted);
+        assert_eq!(rows[0].total_requests, 1);
     }
 
     #[test]

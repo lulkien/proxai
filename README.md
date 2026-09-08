@@ -53,6 +53,10 @@ bind = "127.0.0.1:3000"
 name = "deepseek"
 url = "https://api.deepseek.com"
 api_key = "sk-..."
+
+# Optional: only advertise these upstream model ids (default: all discovered).
+# Models the provider doesn't offer are skipped, not fatal.
+# models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 ```
 
 ## CLI

@@ -230,12 +230,27 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
                     match resp.json::<Value>().await {
                         Ok(json) => {
                             if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                                for entry in data {
-                                    if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
-                                        let namespaced = namespace_model(&provider.name, id);
-                                        info!("  + {namespaced}");
-                                        map.insert(namespaced, provider.name.clone());
+                                let discovered: Vec<&str> = data
+                                    .iter()
+                                    .filter_map(|e| e.get("id").and_then(|i| i.as_str()))
+                                    .collect();
+                                let advertised = select_models(&discovered, &provider.models);
+
+                                // Preferred models the provider doesn't offer
+                                // are skipped, not fatal.
+                                for want in &provider.models {
+                                    if !discovered.iter().any(|id| id == want) {
+                                        warn!(
+                                            "Provider {} does not offer preferred model '{}' — skipped",
+                                            provider.name, want
+                                        );
                                     }
+                                }
+
+                                for id in advertised {
+                                    let namespaced = namespace_model(&provider.name, id);
+                                    info!("  + {namespaced}");
+                                    map.insert(namespaced, provider.name.clone());
                                 }
                             }
                         }
@@ -267,6 +282,22 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
     }
 
     map
+}
+
+/// The subset of a provider's discovered model ids to advertise.
+///
+/// An empty `preferred` list advertises every discovered model; a non-empty
+/// list restricts advertising to those ids, but only such ids the provider
+/// actually offers (missing entries are simply absent from the result).
+fn select_models<'a>(discovered: &[&'a str], preferred: &[String]) -> Vec<&'a str> {
+    if preferred.is_empty() {
+        return discovered.to_vec();
+    }
+    discovered
+        .iter()
+        .copied()
+        .filter(|id| preferred.iter().any(|want| want == id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -305,5 +336,30 @@ mod tests {
             strip_provider_prefix("deepseek/deepseek-chat", "deep"),
             "deepseek/deepseek-chat"
         );
+    }
+
+    #[test]
+    fn select_models_empty_preferred_advertises_all() {
+        let discovered = vec!["deepseek-chat", "deepseek-reasoner", "gpt-4o"];
+        let advertised = select_models(&discovered, &[]);
+        assert_eq!(advertised, discovered);
+    }
+
+    #[test]
+    fn select_models_filters_to_preferred_existing_only() {
+        let discovered = vec!["deepseek-chat", "deepseek-reasoner", "gpt-4o"];
+        let preferred: Vec<String> = ["deepseek-chat", "gpt-4o", "does-not-exist"]
+            .map(String::from)
+            .to_vec();
+        let advertised = select_models(&discovered, &preferred);
+        assert_eq!(advertised, vec!["deepseek-chat", "gpt-4o"]);
+    }
+
+    #[test]
+    fn select_models_matches_exact_ids_only() {
+        // A preferred id must match the whole upstream id, not a substring.
+        let discovered = vec!["deepseek-chat"];
+        let preferred: Vec<String> = ["chat"].map(String::from).to_vec();
+        assert!(select_models(&discovered, &preferred).is_empty());
     }
 }

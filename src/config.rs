@@ -27,6 +27,11 @@ pub struct Provider {
     /// Base URL, e.g. https://api.deepseek.com
     pub url: String,
     pub api_key: String,
+    /// Optional allowlist of upstream model ids to advertise.
+    /// Empty (default) = advertise every model the provider offers;
+    /// non-empty = only these models, when the provider actually has them.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 impl Provider {
@@ -100,5 +105,24 @@ mod tests {
         // Named IANA zones are unsupported; parsing must not panic.
         let (secs, _) = config_with_tz("Asia/Ho_Chi_Minh").timezone_offset();
         assert_eq!(secs, 0);
+    }
+
+    #[test]
+    fn provider_models_defaults_to_empty() {
+        let p: Provider = toml::from_str(
+            "name = 'deepseek'\nurl = 'https://api.deepseek.com'\napi_key = 'sk-x'\n",
+        )
+        .unwrap();
+        assert!(p.models.is_empty(), "models must default to empty");
+    }
+
+    #[test]
+    fn provider_models_parses_allowlist() {
+        let p: Provider = toml::from_str(
+            "name = 'deepseek'\nurl = 'https://api.deepseek.com'\napi_key = 'sk-x'\n\
+             models = ['deepseek-v4-flash', 'deepseek-v4-pro']\n",
+        )
+        .unwrap();
+        assert_eq!(p.models, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
     }
 }

@@ -94,6 +94,10 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    provider_name>`. Requests must use the namespaced id; the prefix is
    stripped before forwarding upstream. Route resolution: `models` map ->
    provider config by name. Usage rows are recorded under the namespaced id.
+   A provider's optional `models` array (config, `#[serde(default)]` empty)
+   restricts advertising to those upstream ids **that the provider actually
+   offers** — missing preferred ids are skipped with a warning, discovery
+   still runs either way.
 2. **Revoke is soft-delete for stats.** Usage rows survive key revocation;
    `deleted` flags are derived per query by comparing against
    `KeyManager::active_hashes()`. The dashboard shows revoked keys with a

@@ -15,10 +15,20 @@ pub struct Config {
     /// Timezone offset for dashboard chart, e.g. "+07:00" (default: UTC).
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    /// How many days of raw per-request usage rows to keep before folding
+    /// them into per-(key, model) cumulative counters (default: 14).
+    /// Must exceed the timeline chart's hard-coded 7-day maximum range,
+    /// otherwise chart history silently truncates.
+    #[serde(default = "default_usage_retention_days")]
+    pub usage_retention_days: u64,
 }
 
 fn default_timezone() -> String {
     "+00:00".into()
+}
+
+fn default_usage_retention_days() -> u64 {
+    14
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -77,6 +87,7 @@ mod tests {
             dashboard_password: None,
             db_path: None,
             timezone: tz.to_string(),
+            usage_retention_days: default_usage_retention_days(),
         }
     }
 
@@ -105,6 +116,19 @@ mod tests {
         // Named IANA zones are unsupported; parsing must not panic.
         let (secs, _) = config_with_tz("Asia/Ho_Chi_Minh").timezone_offset();
         assert_eq!(secs, 0);
+    }
+
+    #[test]
+    fn usage_retention_days_defaults_to_14() {
+        let c: Config = toml::from_str("bind = '127.0.0.1:3000'\n").unwrap();
+        assert_eq!(c.usage_retention_days, 14);
+    }
+
+    #[test]
+    fn usage_retention_days_parses_override() {
+        let c: Config =
+            toml::from_str("bind = '127.0.0.1:3000'\nusage_retention_days = 30\n").unwrap();
+        assert_eq!(c.usage_retention_days, 30);
     }
 
     #[test]

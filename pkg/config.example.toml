@@ -9,6 +9,12 @@ bind = "127.0.0.1:3000"
 # Optional: timezone for dashboard chart, e.g. "+07:00" (default: UTC).
 # timezone = "+07:00"
 
+# Optional: how many days of raw per-request usage rows to keep before
+# folding them into per-(key, model) cumulative counters (default: 14).
+# Keeps the database bounded no matter how long a key lives. Must be >= 7
+# (the timeline chart's maximum range); lower values are clamped to 7.
+# usage_retention_days = 14
+
 # Add providers here. Example:
 #
 # DeepSeek (OpenAI-compatible). Base URL no longer uses /v1.

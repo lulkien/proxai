@@ -136,8 +136,19 @@ impl UsageTracker {
     /// Fold usage rows of revoked keys idle past the retention window into
     /// the `deleted_usage` rollup (see `Storage::consolidate_deleted`).
     /// Returns the number of keys folded.
-    pub fn consolidate(&self, active: &HashSet<String>) -> Result<usize, String> {
+    pub fn consolidate_deleted(&self, active: &HashSet<String>) -> Result<usize, String> {
         self.storage.consolidate_deleted(active)
+    }
+
+    /// Fold raw usage rows older than `retention_days` into per-(key, model)
+    /// cumulative counters (see `Storage::consolidate_aged`). Returns the
+    /// number of raw rows folded.
+    pub fn consolidate_aged(
+        &self,
+        active: &HashSet<String>,
+        retention_days: u64,
+    ) -> Result<usize, String> {
+        self.storage.consolidate_aged(active, retention_days)
     }
 
     /// Per-model usage across all keys for the dashboard Models tab.

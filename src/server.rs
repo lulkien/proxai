@@ -97,9 +97,19 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         Arc::new(Storage::open_with_tz(&db_path, tz_secs, tz_sql).map_err(ProxyError::Internal)?);
     let tracker = Arc::new(UsageTracker::new(storage));
 
-    // Fold idle revoked keys (> STALE_DELETED_KEY_DAYS without a request)
-    // into the deleted-usage rollup and delete their rows. Runs at startup
-    // (first interval tick fires immediately) and then daily.
+    // Database maintenance, runs at startup (first tick fires immediately)
+    // then daily: fold raw rows older than the configured retention window
+    // into per-(key, model) counters, then fold idle revoked keys into the
+    // deleted-usage rollup. Retention must stay >= 7d or the timeline
+    // chart's hard-coded 7-day window would read rows that were already
+    // folded.
+    let retention = config.usage_retention_days.max(7);
+    if config.usage_retention_days < 7 {
+        warn!(
+            "usage_retention_days={} is below the 7d chart window — clamping to 7",
+            config.usage_retention_days
+        );
+    }
     {
         let km = km.clone();
         let tracker = tracker.clone();
@@ -112,14 +122,22 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
                         // Consolidation is sync SQLite work; keep it off the
                         // async runtime thread.
                         let tracker = tracker.clone();
-                        match tokio::task::spawn_blocking(move || tracker.consolidate(&active))
-                            .await
+                        let retention = retention;
+                        match tokio::task::spawn_blocking(move || {
+                            let aged = tracker.consolidate_aged(&active, retention)?;
+                            let deleted = tracker.consolidate_deleted(&active)?;
+                            Ok::<_, String>((aged, deleted))
+                        })
+                        .await
                         {
-                            Ok(Ok(0)) => {}
-                            Ok(Ok(n)) => info!(
-                                "Consolidated {n} idle revoked key(s) into the deleted-usage rollup"
-                            ),
-                            Ok(Err(e)) => warn!("consolidate_deleted failed: {e}"),
+                            Ok(Ok((0, 0))) => {}
+                            Ok(Ok((aged, deleted))) => {
+                                info!(
+                                    "DB maintenance: folded {aged} raw row(s) older than {retention}d, \
+                                     consolidated {deleted} idle revoked key(s) into the deleted-usage rollup"
+                                );
+                            }
+                            Ok(Err(e)) => warn!("consolidation failed: {e}"),
                             Err(e) => warn!("consolidation task failed: {e}"),
                         }
                     }

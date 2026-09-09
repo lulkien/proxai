@@ -59,7 +59,7 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `handlers.rs` | `list_models`, `chat_completions` (streaming + non-streaming paths). |
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
-| `storage.rs` | usage.db schema (usage + deleted_usage rollup), `record()`, `snapshot()` (per-key aggregates + per-model breakdown, incl. aggregated "deleted keys" rollup row), `timeline()` (time-bucketed chart data), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
+| `storage.rs` | usage.db schema (usage + usage_totals + deleted_usage), `record()`, `snapshot()` (per-key aggregates + per-model breakdown over raw + counters, incl. aggregated "deleted keys" rollup row), `timeline()` (time-bucketed chart data), `consolidate_aged()` (folds raw rows past retention into counters), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
 | `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`). |
 | `webui.rs` | `/dashboard/api/*` routes: stats, stats/models, timeline, key list/generate/revoke. |
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
@@ -82,13 +82,14 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
   or logged. Databases created before text ids (legacy `id INTEGER PRIMARY
   KEY`) are rebuilt automatically on open, each row getting a fresh random
   id.
-- **usage.db** (`config.db_path`, default `proxai.db`): one row per request
+- **usage.db** (`config.db_path`, default `proxai.db`): per-request rows
   (`key_hash, key_name, model, prompt_tokens, completion_tokens,
   created_at`), `created_at` written by SQLite `datetime('now')` (UTC) and
-  shifted to the configured timezone in queries. Plus the `deleted_usage`
-  rollup table (model, requests, prompt/completion token sums, merged_at)
-  holding per-model totals of revoked keys folded by
-  `consolidate_deleted` (see invariant 2).
+  shifted to the configured timezone in queries. Raw rows older than
+  `usage_retention_days` are folded into the `usage_totals` cumulative
+  table (one row per key+model). Revoked keys idle >7d fold into the
+  `deleted_usage` rollup (per-model totals, aggregated "deleted keys" row
+  in stats). See invariants 2 and 3.
 
 ## Invariants and gotchas (project knowledge)
 
@@ -110,18 +111,27 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    `timeline`. A revoked key idle longer than `STALE_DELETED_KEY_DAYS` (7d)
    is folded by `Storage::consolidate_deleted` (run at startup + daily in
    `serve`) into the `deleted_usage` rollup table (per-model totals) and
-   its original rows are **physically deleted** — the only DELETE on usage
-   rows. `snapshot()` then surfaces the rollup as ONE aggregated "deleted
-   keys" row (flagged deleted) so all-time totals and per-model spend never
-   shrink after a revoke.
-3. **Streaming token counting.** `handlers.rs` forces
+   its original rows are **physically deleted** — from both `usage` and
+   `usage_totals`. `snapshot()` then surfaces the rollup as ONE aggregated
+   "deleted keys" row (flagged deleted) so all-time totals and per-model
+   spend never shrink after a revoke.
+3. **Raw rows age out via retention fold.** Raw per-request rows older than
+   `config.usage_retention_days` (default 14, clamped >= 7 to cover the
+   chart's max range) are folded by `Storage::consolidate_aged` into
+   per-(key, model) cumulative counters in `usage_totals`, then deleted —
+   so the `usage` table stays bounded (~retention window of traffic) no
+   matter how long a key lives. `snapshot()` and the per-model breakdown
+   UNION `usage` + `usage_totals`; `timeline()` reads only `usage` (raw
+   rows inside 1d/7d windows, never older than retention). Revoked keys
+   are skipped by the aged fold and handled wholesale by the deleted fold.
+4. **Streaming token counting.** `handlers.rs` forces
    `stream_options.include_usage=true` upstream, tees the response body
    through a bounded `mpsc` channel (capacity 16) while a spawned task keeps
    only the trailing 64 KiB (UTF-8-safe via `append_tail`) of the SSE text,
    then parses the final `usage` chunk with `sse_usage_tokens`. Status,
    `content-type`, and `transfer-encoding` are passed through; the client
    body must stay byte-transparent.
-4. **Admin socket is unauthenticated** — it lives in the Linux abstract
+5. **Admin socket is unauthenticated** — it lives in the Linux abstract
    namespace as `@proxai` (default; override with `--socket <name>`).
    Abstract sockets have no filesystem path, so there is no stale-file
    cleanup and no 0600-style permission model: any local process that
@@ -133,43 +143,43 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    the same with `connect_addr`). Framing: 4-byte little-endian u32 length
    + bincode payload, max request 1 MiB. The systemd unit passes
    `--socket proxai`.
-5. **Dashboard auth is optional and plaintext.** `dashboard_password` unset =
+6. **Dashboard auth is optional and plaintext.** `dashboard_password` unset =
    open dashboard. It is compared with `==` against the Bearer token — no
    constant-time compare, acceptable because this is a convenience gate, not
    key auth. New dashboard endpoints must call `check_auth`.
-6. **Timezone config.** `timezone` is a fixed-offset string (`"+07:00"`,
+7. **Timezone config.** `timezone` is a fixed-offset string (`"+07:00"`,
    default `+00:00`) parsed by `Config::timezone_offset()` into (seconds,
    SQL modifier). Known asymmetry: the SQL modifier only carries whole hours
    (`"+7 hours"`), so minute offsets shift chart bucketing imprecisely, and
    IANA names fall back to UTC. Keep this behavior or fix both sides
    together (tests in config.rs pin it).
-7. **Rate limiter is process-global.** `static LazyLock<RateLimiter>` in
+8. **Rate limiter is process-global.** `static LazyLock<RateLimiter>` in
    auth.rs: 20 failed auth attempts per IP per 60 s -> 429. Reset on success.
-8. **Sync SQLite behind std `Mutex` in async code** (KeyManager, Storage) is
+9. **Sync SQLite behind std `Mutex` in async code** (KeyManager, Storage) is
    deliberate: operations are short and serialized. Never hold these locks
    across `.await`; never add long queries to request paths.
-9. **HTTP error shape** is the OpenAI-style envelope
+10. **HTTP error shape** is the OpenAI-style envelope
    `{"error": {"message", "type", "code"}}` produced by `ProxyError`
    (`IntoResponse`). Errors crossing the HTTP boundary map to `ProxyError`;
    SQLite-internal layers keep `Result<_, String>`. `thiserror` is available
    if a structured error ever needs deriving, but match existing hand-rolled
    style unless there is a reason.
-10. **`/v1/responses` was removed** (commit 0dff06b) — do not resurrect.
+11. **`/v1/responses` was removed** (commit 0dff06b) — do not resurrect.
     Only `/v1/models` and `/v1/chat/completions` exist behind auth.
-11. **Dashboard is static HTML/JS** (the old WASM build is gone). Files in
+12. **Dashboard is static HTML/JS** (the old WASM build is gone). Files in
     `dashboard/` are embedded at compile time via rust-embed — changes
     require a rebuild. `content_type()` in server.rs still lists `.wasm`
     (harmless leftover, unused).
-12. **XSS rule for the dashboard:** every user/DB-derived string (key names,
+13. **XSS rule for the dashboard:** every user/DB-derived string (key names,
     model names) interpolated into `innerHTML` must go through `esc()` in
     dashboard/app.js (added in e10c6ef). Never bypass it for new renderings.
-13. **Legacy migration:** KeyManager auto-imports `keys.json` (cwd-relative)
+14. **Legacy migration:** KeyManager auto-imports `keys.json` (cwd-relative)
     into an empty keys.db. Do not remove; do not rely on it for new keys.
-14. **Secrets hygiene:** real provider `api_key`s and client keys must never
+15. **Secrets hygiene:** real provider `api_key`s and client keys must never
     be printed in server logs, committed, or written into docs. Config files
     with real keys are gitignored (`config.toml`, `keys.json`, `*.db`,
     `Cargo.lock` is also ignored — deliberate).
-15. **reqwest client**: rustls (no OpenSSL), 120 s timeout, JSON + stream
+16. **reqwest client**: rustls (no OpenSSL), 120 s timeout, JSON + stream
     features. The same `Client` in `ProxyState` serves both discovery and
     proxying.
 

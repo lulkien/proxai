@@ -45,8 +45,17 @@ impl Storage {
                  requests INTEGER NOT NULL DEFAULT 0,
                  prompt_tokens INTEGER NOT NULL DEFAULT 0,
                  completion_tokens INTEGER NOT NULL DEFAULT 0,
-                 keys INTEGER NOT NULL DEFAULT 0,
                  merged_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS usage_totals (
+                 key_hash TEXT NOT NULL,
+                 key_name TEXT NOT NULL DEFAULT '',
+                 model TEXT NOT NULL,
+                 requests INTEGER NOT NULL DEFAULT 0,
+                 prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                 completion_tokens INTEGER NOT NULL DEFAULT 0,
+                 last_used TEXT NOT NULL,
+                 PRIMARY KEY (key_hash, model)
              );
              CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(key_hash);
              CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(key_hash, model);
@@ -80,12 +89,13 @@ impl Storage {
 
     /// Fold usage rows of revoked keys that have been idle longer than
     /// `STALE_DELETED_KEY_DAYS` into the `deleted_usage` rollup (per-model
-    /// totals preserved) and physically delete the original rows.
+    /// totals preserved) and physically delete the original rows — from
+    /// both `usage` and `usage_totals` (a long-lived key may already have
+    /// aged counters by the time it is revoked).
     ///
     /// `active` holds the hashes of keys that still exist. Returns the
-    /// number of keys folded. Idempotent: keys already folded have no usage
-    /// rows left, so a second run folds nothing. This is the only place
-    /// usage rows are ever deleted.
+    /// number of keys folded. Idempotent: keys already folded have no rows
+    /// left, so a second run folds nothing.
     pub fn consolidate_deleted(&self, active: &HashSet<String>) -> Result<usize, String> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(STALE_DELETED_KEY_DAYS))
             .format("%Y-%m-%d %H:%M:%S")
@@ -94,9 +104,16 @@ impl Storage {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
 
-        // Revoked keys whose newest row predates the retention window.
+        // Revoked keys whose newest activity (raw row or aged counter)
+        // predates the retention window.
         let mut stmt = tx
-            .prepare("SELECT key_hash, MAX(created_at) FROM usage GROUP BY key_hash")
+            .prepare(
+                "SELECT key_hash, MAX(ts) FROM (
+                    SELECT key_hash, created_at AS ts FROM usage
+                    UNION ALL
+                    SELECT key_hash, last_used AS ts FROM usage_totals
+                 ) GROUP BY key_hash",
+            )
             .map_err(|e| format!("prepare: {e}"))?;
         let stale: Vec<String> = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -125,22 +142,39 @@ impl Storage {
         let mut del_stmt = tx
             .prepare("DELETE FROM usage WHERE key_hash = ?1")
             .map_err(|e| format!("prepare delete: {e}"))?;
+        let mut del_tot_stmt = tx
+            .prepare("DELETE FROM usage_totals WHERE key_hash = ?1")
+            .map_err(|e| format!("prepare delete totals: {e}"))?;
         let mut model_stmt = tx
             .prepare(
                 "SELECT model, COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
                  FROM usage WHERE key_hash = ?1 GROUP BY model",
             )
             .map_err(|e| format!("prepare model: {e}"))?;
+        let mut tot_stmt = tx
+            .prepare(
+                "SELECT model, requests, prompt_tokens, completion_tokens
+                 FROM usage_totals WHERE key_hash = ?1",
+            )
+            .map_err(|e| format!("prepare totals: {e}"))?;
 
         let mut folded = 0usize;
         for hash in &stale {
-            let models: Vec<(String, i64, i64, i64)> = model_stmt
+            let mut models: Vec<(String, i64, i64, i64)> = model_stmt
                 .query_map(params![hash], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .map_err(|e| format!("query models: {e}"))?
                 .filter_map(|r| r.ok())
                 .collect();
+            let tot_models: Vec<(String, i64, i64, i64)> = tot_stmt
+                .query_map(params![hash], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .map_err(|e| format!("query totals: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+            models.extend(tot_models);
             for (model, req, pt, ct) in models {
                 fold_stmt
                     .execute(params![model, req, pt, ct])
@@ -149,11 +183,114 @@ impl Storage {
             del_stmt
                 .execute(params![hash])
                 .map_err(|e| format!("delete {hash}: {e}"))?;
+            del_tot_stmt
+                .execute(params![hash])
+                .map_err(|e| format!("delete totals {hash}: {e}"))?;
             folded += 1;
         }
+        drop(tot_stmt);
         drop(model_stmt);
+        drop(del_tot_stmt);
         drop(del_stmt);
         drop(fold_stmt);
+
+        tx.commit().map_err(|e| format!("commit: {e}"))?;
+        Ok(folded)
+    }
+
+    /// Fold raw `usage` rows older than `retention_days` into the
+    /// per-(key, model) cumulative `usage_totals` counters, then delete the
+    /// raw rows. Applies only to currently-active keys; revoked keys are
+    /// handled wholesale by `consolidate_deleted`.
+    ///
+    /// This bounds the raw table to roughly `retention_days` of traffic no
+    /// matter how long a key lives. Returns the number of raw rows folded.
+    /// Idempotent: already-folded rows are gone.
+    pub fn consolidate_aged(
+        &self,
+        active: &HashSet<String>,
+        retention_days: u64,
+    ) -> Result<usize, String> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days as i64))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| format!("begin: {e}"))?;
+
+        // Active keys that still have rows older than the cutoff.
+        let mut stmt = tx
+            .prepare("SELECT DISTINCT key_hash FROM usage WHERE created_at < ?1")
+            .map_err(|e| format!("prepare: {e}"))?;
+        let candidates: Vec<String> = stmt
+            .query_map(params![&cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("query: {e}"))?
+            .filter_map(|r| r.ok())
+            .filter(|h| active.contains(h))
+            .collect();
+        drop(stmt);
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        // Per (key, model): roll the old rows into counters.
+        let mut agg_stmt = tx
+            .prepare(
+                "SELECT key_name, model, COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), MAX(created_at)
+                 FROM usage WHERE key_hash = ?1 AND created_at < ?2 GROUP BY key_name, model",
+            )
+            .map_err(|e| format!("prepare agg: {e}"))?;
+        let mut upsert_stmt = tx
+            .prepare(
+                "INSERT INTO usage_totals (key_hash, key_name, model, requests, prompt_tokens, completion_tokens, last_used)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(key_hash, model) DO UPDATE SET
+                     key_name = excluded.key_name,
+                     requests = requests + excluded.requests,
+                     prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+                     completion_tokens = completion_tokens + excluded.completion_tokens,
+                     last_used = MAX(usage_totals.last_used, excluded.last_used)",
+            )
+            .map_err(|e| format!("prepare upsert: {e}"))?;
+        let mut del_stmt = tx
+            .prepare("DELETE FROM usage WHERE key_hash = ?1 AND created_at < ?2")
+            .map_err(|e| format!("prepare delete: {e}"))?;
+
+        let mut folded = 0usize;
+        for hash in &candidates {
+            let groups: Vec<(String, String, i64, i64, i64, String)> = agg_stmt
+                .query_map(params![hash, &cutoff], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .map_err(|e| format!("query agg: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut rows_here = 0usize;
+            for (name, model, req, pt, ct, last) in &groups {
+                upsert_stmt
+                    .execute(params![hash, name, model, req, pt, ct, last])
+                    .map_err(|e| format!("upsert {model}: {e}"))?;
+                rows_here += *req as usize;
+            }
+            if !groups.is_empty() {
+                let deleted = del_stmt
+                    .execute(params![hash, &cutoff])
+                    .map_err(|e| format!("delete {hash}: {e}"))?;
+                debug_assert_eq!(deleted, rows_here);
+                folded += rows_here;
+            }
+        }
+        drop(del_stmt);
+        drop(upsert_stmt);
+        drop(agg_stmt);
 
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         Ok(folded)
@@ -170,17 +307,29 @@ impl Storage {
     pub fn snapshot(&self, active: &HashSet<String>) -> Vec<KeyUsageRow> {
         let conn = self.conn.lock().unwrap();
 
-        // Per-key aggregates
+        // Per-key aggregates: raw rows (recent, per-request) + aged
+        // cumulative counters (usage_totals) both count toward all-time
+        // totals. Both timestamps are SQLite UTC 'YYYY-MM-DD HH:MM:SS' so
+        // MAX() compares correctly across the union.
         let tz = &self.tz_sql;
         let sql = format!(
-            "SELECT key_hash, key_name,
-                    COUNT(*) as total_requests,
-                    COALESCE(SUM(prompt_tokens), 0) as total_prompt,
-                    COALESCE(SUM(completion_tokens), 0) as total_completion,
-                    datetime(MAX(created_at), '{tz}') as last_used
-             FROM usage
+            "SELECT key_hash,
+                    MAX(key_name) as key_name,
+                    SUM(requests) as total_requests,
+                    SUM(prompt_tokens) as total_prompt,
+                    SUM(completion_tokens) as total_completion,
+                    datetime(MAX(last), '{tz}') as last_used
+             FROM (
+                 SELECT key_hash, key_name, 1 as requests, prompt_tokens, completion_tokens,
+                        created_at as last
+                 FROM usage
+                 UNION ALL
+                 SELECT key_hash, key_name, requests, prompt_tokens, completion_tokens,
+                        last_used as last
+                 FROM usage_totals
+             )
              GROUP BY key_hash
-             ORDER BY MAX(created_at) DESC"
+             ORDER BY MAX(last) DESC"
         );
         let mut stmt = conn.prepare(&sql).unwrap();
 
@@ -210,15 +359,22 @@ impl Storage {
         // `consolidate_deleted` physically folds it into the rollup, so
         // totals never undercount between consolidation runs.
 
-        // Per-model breakdown for each key
+        // Per-model breakdown for each key: same union of raw + counters.
         let mut model_stmt = conn
             .prepare(
                 "SELECT model,
-                        COUNT(*) as requests,
-                        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-                        COALESCE(SUM(completion_tokens), 0) as completion_tokens
-                 FROM usage
-                 WHERE key_hash = ?1
+                        SUM(requests) as requests,
+                        SUM(prompt_tokens) as prompt_tokens,
+                        SUM(completion_tokens) as completion_tokens
+                 FROM (
+                     SELECT model, 1 as requests, prompt_tokens, completion_tokens
+                     FROM usage
+                     WHERE key_hash = ?1
+                     UNION ALL
+                     SELECT model, requests, prompt_tokens, completion_tokens
+                     FROM usage_totals
+                     WHERE key_hash = ?1
+                 )
                  GROUP BY model
                  ORDER BY requests DESC",
             )
@@ -636,6 +792,148 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 3);
+    }
+
+    #[test]
+    fn consolidate_aged_folds_only_rows_older_than_retention() {
+        let s = test_storage();
+        // Active key with a mix of fresh and old rows.
+        let conn = s.conn.lock().unwrap();
+        for (model, pt, ct, ts) in [
+            ("gpt", 100, 20, "2020-01-01 00:00:00"),
+            ("gpt", 50, 10, "2020-01-02 00:00:00"),
+            ("claude", 7, 3, "2020-01-03 00:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO usage (key_hash, key_name, model, prompt_tokens, completion_tokens, created_at)
+                 VALUES ('hash-alice', 'alice', ?1, ?2, ?3, ?4)",
+                params![model, pt, ct, ts],
+            )
+            .unwrap();
+        }
+        // A fresh row that must survive (within retention).
+        drop(conn);
+        s.record("hash-alice", "alice", "gpt", 1, 1);
+
+        let active: HashSet<String> = ["hash-alice".into()].into_iter().collect();
+        let folded = s.consolidate_aged(&active, 14).unwrap();
+        assert_eq!(folded, 3, "three old rows fold, fresh row stays");
+
+        // Only the fresh row remains raw.
+        let conn = s.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        drop(conn);
+
+        // Counters hold the folded per-model totals.
+        let stats = s.snapshot(&active);
+        assert_eq!(stats.len(), 1);
+        let alice = &stats[0];
+        assert!(!alice.deleted);
+        assert_eq!(alice.total_requests, 4, "folded 3 + fresh 1 all count");
+        assert_eq!(alice.total_prompt_tokens, 158);
+        assert_eq!(alice.total_completion_tokens, 34);
+        let gpt = alice.models.iter().find(|m| m.model == "gpt").unwrap();
+        assert_eq!(
+            (gpt.requests, gpt.prompt_tokens, gpt.completion_tokens),
+            (3, 151, 31)
+        );
+        let claude = alice.models.iter().find(|m| m.model == "claude").unwrap();
+        assert_eq!(
+            (
+                claude.requests,
+                claude.prompt_tokens,
+                claude.completion_tokens
+            ),
+            (1, 7, 3)
+        );
+    }
+
+    #[test]
+    fn consolidate_aged_is_idempotent_and_skips_revoked() {
+        let s = test_storage();
+        // Old row for an ACTIVE key and an old row for a REVOKED key.
+        for (hash, name, model) in [
+            ("hash-active", "alice", "gpt"),
+            ("hash-revoked", "bob", "claude"),
+        ] {
+            s.conn.lock().unwrap()
+                .execute(
+                    "INSERT INTO usage (key_hash, key_name, model, prompt_tokens, completion_tokens, created_at)
+                     VALUES (?1, ?2, ?3, 5, 2, '2020-01-01 00:00:00')",
+                    params![hash, name, model],
+                )
+                .unwrap();
+        }
+
+        let active: HashSet<String> = ["hash-active".into()].into_iter().collect();
+        let folded = s.consolidate_aged(&active, 14).unwrap();
+        assert_eq!(folded, 1, "only the active key's row folds");
+
+        // Second run folds nothing.
+        let folded_again = s.consolidate_aged(&active, 14).unwrap();
+        assert_eq!(folded_again, 0);
+
+        let conn = s.conn.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "revoked key's raw row is left for deleted-fold"
+        );
+        drop(conn);
+
+        // Revoked key with aged counters still consolidates fully later.
+        let folded_deleted = s.consolidate_deleted(&active).unwrap();
+        assert_eq!(folded_deleted, 1);
+    }
+
+    #[test]
+    fn consolidate_deleted_folds_aged_counters_too() {
+        let s = test_storage();
+        // Simulate a long-lived key: old raw rows plus aged counters, then
+        // revoked and idle long enough for deleted-fold to claim both.
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO usage (key_hash, key_name, model, prompt_tokens, completion_tokens, created_at)
+                 VALUES ('hash-gone', 'work', 'gpt', 10, 5, '2020-01-02 00:00:00')",
+                [],
+            )
+            .unwrap();
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO usage_totals (key_hash, key_name, model, requests, prompt_tokens, completion_tokens, last_used)
+                 VALUES ('hash-gone', 'work', 'gpt', 500, 9000, 300, '2020-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+
+        // Revoked and idle: deleted-fold must absorb BOTH raw and counters.
+        let folded = s.consolidate_deleted(&HashSet::new()).unwrap();
+        assert_eq!(folded, 1);
+
+        let conn = s.conn.lock().unwrap();
+        let raw: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, 0);
+        let totals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_totals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(totals, 0, "aged counters must not outlive the key");
+        drop(conn);
+
+        let rows = s.snapshot(&HashSet::new());
+        let bucket = rows
+            .iter()
+            .find(|r| r.key_hash == DELETED_BUCKET_KEY)
+            .unwrap();
+        assert_eq!(bucket.total_requests, 501, "raw 1 + counter 500");
+        assert_eq!(bucket.total_prompt_tokens, 9010);
+        assert_eq!(bucket.total_completion_tokens, 305);
     }
 
     #[test]

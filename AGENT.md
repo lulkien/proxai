@@ -59,7 +59,7 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `handlers.rs` | `list_models`, `chat_completions` (streaming + non-streaming paths). |
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
-| `storage.rs` | usage.db schema, `snapshot()` (per-key aggregates + per-model breakdown), `timeline()` (time-bucketed chart data). Errors `Result<_, String>`. |
+| `storage.rs` | usage.db schema (usage + deleted_usage rollup), `record()`, `snapshot()` (per-key aggregates + per-model breakdown, incl. aggregated "deleted keys" rollup row), `timeline()` (time-bucketed chart data), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
 | `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`). |
 | `webui.rs` | `/dashboard/api/*` routes: stats, stats/models, timeline, key list/generate/revoke. |
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
@@ -85,7 +85,10 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 - **usage.db** (`config.db_path`, default `proxai.db`): one row per request
   (`key_hash, key_name, model, prompt_tokens, completion_tokens,
   created_at`), `created_at` written by SQLite `datetime('now')` (UTC) and
-  shifted to the configured timezone in queries.
+  shifted to the configured timezone in queries. Plus the `deleted_usage`
+  rollup table (model, requests, prompt/completion token sums, merged_at)
+  holding per-model totals of revoked keys folded by
+  `consolidate_deleted` (see invariant 2).
 
 ## Invariants and gotchas (project knowledge)
 
@@ -100,10 +103,17 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    restricts advertising to those upstream ids **that the provider actually
    offers** — missing preferred ids are skipped with a warning, discovery
    still runs either way.
-2. **Revoke is soft-delete for stats.** Usage rows survive key revocation;
-   `deleted` flags are derived per query by comparing against
-   `KeyManager::active_hashes()`. The dashboard shows revoked keys with a
-   "(deleted)" marker — do not filter them out of `snapshot`/`timeline`.
+2. **Revoke keeps stats; consolidation reclaims rows.** Usage rows survive
+   key revocation; `deleted` flags are derived per query by comparing
+   against `KeyManager::active_hashes()`. The dashboard shows revoked keys
+   with a "(deleted)" marker — do not filter them out of `snapshot`/
+   `timeline`. A revoked key idle longer than `STALE_DELETED_KEY_DAYS` (7d)
+   is folded by `Storage::consolidate_deleted` (run at startup + daily in
+   `serve`) into the `deleted_usage` rollup table (per-model totals) and
+   its original rows are **physically deleted** — the only DELETE on usage
+   rows. `snapshot()` then surfaces the rollup as ONE aggregated "deleted
+   keys" row (flagged deleted) so all-time totals and per-model spend never
+   shrink after a revoke.
 3. **Streaming token counting.** `handlers.rs` forces
    `stream_options.include_usage=true` upstream, tees the response body
    through a bounded `mpsc` channel (capacity 16) while a spawned task keeps

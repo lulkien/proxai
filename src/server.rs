@@ -97,6 +97,38 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         Arc::new(Storage::open_with_tz(&db_path, tz_secs, tz_sql).map_err(ProxyError::Internal)?);
     let tracker = Arc::new(UsageTracker::new(storage));
 
+    // Fold idle revoked keys (> STALE_DELETED_KEY_DAYS without a request)
+    // into the deleted-usage rollup and delete their rows. Runs at startup
+    // (first interval tick fires immediately) and then daily.
+    {
+        let km = km.clone();
+        let tracker = tracker.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                ticker.tick().await;
+                match km.active_hashes() {
+                    Ok(active) => {
+                        // Consolidation is sync SQLite work; keep it off the
+                        // async runtime thread.
+                        let tracker = tracker.clone();
+                        match tokio::task::spawn_blocking(move || tracker.consolidate(&active))
+                            .await
+                        {
+                            Ok(Ok(0)) => {}
+                            Ok(Ok(n)) => info!(
+                                "Consolidated {n} idle revoked key(s) into the deleted-usage rollup"
+                            ),
+                            Ok(Err(e)) => warn!("consolidate_deleted failed: {e}"),
+                            Err(e) => warn!("consolidation task failed: {e}"),
+                        }
+                    }
+                    Err(e) => warn!("active_hashes failed, skipping consolidation: {e}"),
+                }
+            }
+        });
+    }
+
     // Bind the admin Unix socket up front so a bind failure aborts startup
     // (rather than silently losing admin capability).
     let admin_socket = socket_path.to_string();

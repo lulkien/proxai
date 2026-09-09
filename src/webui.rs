@@ -13,15 +13,20 @@ pub fn dashboard_api_router(
     tracker: Arc<UsageTracker>,
     key_manager: Arc<KeyManager>,
     dashboard_password: &Option<String>,
+    advertised_models: Vec<String>,
+    deactivated_count: usize,
 ) -> Router {
     let state = DashboardState {
         tracker,
         key_manager,
         password: dashboard_password.clone(),
+        advertised_models,
+        deactivated_count,
     };
 
     Router::new()
         .route("/stats", get(stats_handler))
+        .route("/stats/models", get(models_handler))
         .route("/stats/timeline", get(timeline_handler))
         .route("/keys", get(list_keys))
         .route(
@@ -37,6 +42,11 @@ struct DashboardState {
     tracker: Arc<UsageTracker>,
     key_manager: Arc<KeyManager>,
     password: Option<String>,
+    /// Namespaced model ids currently advertised (post-allowlist). Every
+    /// advertised model appears in the Models tab, even with zero usage.
+    advertised_models: Vec<String>,
+    /// Count of models discovered from providers but not advertised.
+    deactivated_count: usize,
 }
 
 // ── Auth helper ──
@@ -85,6 +95,24 @@ async fn stats_handler(
         .active_hashes()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(state.tracker.snapshot(&active)))
+}
+
+/// Per-model usage across all keys, restricted to currently advertised
+/// models (zero-filled for advertised models with no traffic yet).
+async fn models_handler(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::metrics::ModelStats>, StatusCode> {
+    check_auth(&headers, &state.password)?;
+    let active = state
+        .key_manager
+        .active_hashes()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(state.tracker.model_stats(
+        &active,
+        &state.advertised_models,
+        state.deactivated_count,
+    )))
 }
 
 #[derive(Debug, Deserialize)]

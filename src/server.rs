@@ -29,6 +29,17 @@ pub struct ProxyState {
     pub tracker: Arc<UsageTracker>,
 }
 
+/// Result of model discovery: the advertised map (used for routing and
+/// /v1/models) plus the ids a provider offered but that were filtered out
+/// by its allowlist. The latter are counted for the dashboard's
+/// "deactivated models" card.
+pub struct ModelDiscovery {
+    pub advertised: HashMap<String, String>,
+    /// Namespaced ids the provider offered but that its `models` allowlist
+    /// filtered out (discovered but not advertised).
+    pub inactive: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct ModelEntry {
     pub id: String,
@@ -63,7 +74,7 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
-    let models = discover_models(&client, &config).await;
+    let discovery = discover_models(&client, &config).await;
     let (tz_secs, tz_sql) = config.timezone_offset();
     let km = Arc::new(KeyManager::open_with_tz(key_db, tz_secs).map_err(ProxyError::Internal)?);
 
@@ -102,9 +113,14 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
     let state = ProxyState {
         client,
         config: config.clone(),
-        models: Arc::new(models),
+        models: Arc::new(discovery.advertised),
         tracker: tracker.clone(),
     };
+
+    // Advertised ids + deactivated count feed the dashboard Models tab.
+    // Captured before `state` is moved into the router below.
+    let advertised_models: Vec<String> = state.models.keys().cloned().collect();
+    let deactivated_count = discovery.inactive.len();
 
     let api_routes = Router::new()
         .route("/v1/models", get(handlers::list_models))
@@ -117,8 +133,13 @@ pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result
         ))
         .with_state(state);
 
-    let dashboard_api =
-        crate::webui::dashboard_api_router(tracker.clone(), km.clone(), &config.dashboard_password);
+    let dashboard_api = crate::webui::dashboard_api_router(
+        tracker.clone(),
+        km.clone(),
+        &config.dashboard_password,
+        advertised_models,
+        deactivated_count,
+    );
 
     // Serve embedded dashboard WASM files
     let dash_files = Router::new()
@@ -204,10 +225,11 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String, String> {
+pub async fn discover_models(client: &Client, config: &Config) -> ModelDiscovery {
     use axum::http::header;
 
     let mut map = HashMap::new();
+    let mut inactive: Vec<String> = Vec::new();
 
     for provider in &config.providers {
         let models_url = provider.models_url();
@@ -252,6 +274,14 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
                                     info!("  + {namespaced}");
                                     map.insert(namespaced, provider.name.clone());
                                 }
+                                // Discovered but filtered out by the allowlist:
+                                // counted (not advertised) for the dashboard.
+                                for id in discovered {
+                                    let namespaced = namespace_model(&provider.name, id);
+                                    if !map.contains_key(&namespaced) {
+                                        inactive.push(namespaced);
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -278,10 +308,19 @@ pub async fn discover_models(client: &Client, config: &Config) -> HashMap<String
     if map.is_empty() {
         warn!("No models discovered — proxy will reject all chat requests");
     } else {
-        info!("Total models discovered: {}", map.len());
+        info!("Total models advertised: {}", map.len());
+    }
+    if !inactive.is_empty() {
+        info!(
+            "  {} discovered model(s) not advertised (allowlist) — counted as deactivated",
+            inactive.len()
+        );
     }
 
-    map
+    ModelDiscovery {
+        advertised: map,
+        inactive,
+    }
 }
 
 /// The subset of a provider's discovered model ids to advertise.

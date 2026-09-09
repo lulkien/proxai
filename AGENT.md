@@ -60,8 +60,8 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
 | `storage.rs` | usage.db schema, `snapshot()` (per-key aggregates + per-model breakdown), `timeline()` (time-bucketed chart data). Errors `Result<_, String>`. |
-| `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. |
-| `webui.rs` | `/dashboard/api/*` routes: stats, timeline, key list/generate/revoke. |
+| `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`). |
+| `webui.rs` | `/dashboard/api/*` routes: stats, stats/models, timeline, key list/generate/revoke. |
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
 | `client.rs` | CLI side of the admin socket (generate/list/revoke key). |
 | `cli.rs` | clap types: `serve`, `cli` (socket), `key` (offline direct-db). |
@@ -91,7 +91,9 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 
 1. **Model ids are namespaced `provider/model`.** Discovered from each
    provider's `/models` at startup and stored as `HashMap<namespaced_id,
-   provider_name>`. Requests must use the namespaced id; the prefix is
+   provider_name>` (see `ModelDiscovery` — discovery also returns the
+   allowlist-filtered ids, counted as "deactivated" on the dashboard).
+   Requests must use the namespaced id; the prefix is
    stripped before forwarding upstream. Route resolution: `models` map ->
    provider config by name. Usage rows are recorded under the namespaced id.
    A provider's optional `models` array (config, `#[serde(default)]` empty)

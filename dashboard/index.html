@@ -10,8 +10,9 @@
 <div class="app">
   <h1>ProxAI Dashboard</h1>
   <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('usage')">Usage</button>
-    <button class="tab-btn" onclick="switchTab('keys')">Keys</button>
+    <button class="tab-btn active" data-tab="usage" onclick="switchTab('usage')">Usage</button>
+    <button class="tab-btn" data-tab="models" onclick="switchTab('models')">Models</button>
+    <button class="tab-btn" data-tab="keys" onclick="switchTab('keys')">Keys</button>
   </div>
   <div id="content"><div id="loading">Loading...</div></div>
 </div>

@@ -20,9 +20,51 @@ async function fetchJSON(url, opts) {
 // ── Tabs ──
 
 function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach((b, i) =>
-    b.classList.toggle('active', (i === 0 ? 'usage' : 'keys') === tab));
-  if (tab === 'usage') loadUsage(); else loadKeys();
+  document.querySelectorAll('.tab-btn').forEach(b =>
+    b.classList.toggle('active', b.getAttribute('data-tab') === tab));
+  if (tab === 'usage') loadUsage();
+  else if (tab === 'models') loadModels();
+  else loadKeys();
+}
+
+// ── Models ──
+
+// Token counts arrive as JSON strings (they can exceed Number.MAX_SAFE_INTEGER);
+// sum and format them with BigInt.
+function fmtTokens(a, b) {
+  try { return (BigInt(a) + BigInt(b)).toLocaleString('en'); }
+  catch (e) { return String(Number(a) + Number(b)); }
+}
+
+async function loadModels() {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div id="loading">Loading...</div>';
+  try {
+    const data = await fetchJSON(API + '/stats/models');
+    el.innerHTML = renderModels(data);
+  } catch (e) {
+    el.innerHTML = '<div class="error-msg">' + e.message + '</div>';
+  }
+}
+
+function renderModels(data) {
+  const models = data.active || [];
+  const rows = models.map(m =>
+    '<tr><td class="key-name">' + esc(m.model) + '</td>'
+    + '<td>' + fmtNum(m.requests) + '</td>'
+    + '<td>' + fmtTokens(m.prompt_tokens, m.completion_tokens) + '</td></tr>'
+  ).join('');
+  const table = models.length === 0
+    ? '<div class="empty">No advertised models. Check provider discovery logs.</div>'
+    : '<table><thead><tr><th>Model</th><th>Requests</th><th>Token Spend</th></tr></thead><tbody>'
+      + rows + '</tbody></table>';
+
+  return '<div class="cards">'
+    + '<div class="card"><div class="label">Active Models</div><div class="value">' + fmtNum(models.length) + '</div></div>'
+    + '<div class="card"><div class="label">Deactivated Models</div><div class="value">' + fmtNum(data.deactivated_count || 0) + '</div></div>'
+    + '</div>'
+    + table
+    + '<div class="updated">Updated: ' + data.updated_at + '</div>';
 }
 
 // ── Usage ──

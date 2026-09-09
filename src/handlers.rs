@@ -8,7 +8,7 @@ use axum::{
 };
 use futures::StreamExt;
 use serde_json::Value;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 use crate::server::{ModelEntry, ModelList, strip_provider_prefix};
 
@@ -46,7 +46,7 @@ pub async fn chat_completions(
         .map(|s| s.to_string())
         .ok_or_else(|| ProxyError::InvalidRequest("missing 'model' field".into()))?;
 
-    info!("Request for model: {model}");
+    debug!("Request for model: {model}");
 
     let provider = {
         let owner = state
@@ -70,7 +70,7 @@ pub async fn chat_completions(
             .insert("model".into(), Value::String(upstream_model.to_string()));
     }
 
-    info!(
+    debug!(
         "Routing to provider: {} -> {}",
         provider.name,
         provider.chat_url()

@@ -159,6 +159,10 @@ impl UsageTracker {
     /// are excluded: those models are not in `advertised` and therefore not
     /// counted at all. `deactivated_count` (discovered-but-not-advertised
     /// models, from model discovery) passes through into the response.
+    ///
+    /// Folded-deleted keys (see `consolidate_deleted`) are NOT in the
+    /// snapshot, but their per-model totals from the `deleted_usage` rollup
+    /// are merged in here, so per-model spend keeps counting them.
     pub fn model_stats(
         &self,
         active: &HashSet<String>,
@@ -176,6 +180,14 @@ impl UsageTracker {
                 e.1 += u.prompt_tokens;
                 e.2 += u.completion_tokens;
             }
+        }
+        // Deleted keys are invisible in the snapshot; fold their rollup
+        // totals into the per-model aggregation instead.
+        for m in self.storage.deleted_usage_rows() {
+            let e = agg.entry(m.model).or_insert((0, 0, 0));
+            e.0 += m.requests as u64;
+            e.1 += m.prompt_tokens as u64;
+            e.2 += m.completion_tokens as u64;
         }
 
         // One row per advertised model, zero-filled when unused.
@@ -315,5 +327,43 @@ mod tests {
             serde_json::Value::String("9007199254740993".into())
         );
         assert_eq!(json["active"][0]["completion_tokens"], "1");
+    }
+
+    #[test]
+    fn model_stats_includes_folded_deleted_usage() {
+        // Deleted keys vanish from the snapshot, but their rolled-up
+        // per-model totals must still count in model stats.
+        let path = std::env::temp_dir().join(format!(
+            "proxai-metrics-deleted-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let storage = Arc::new(
+            Storage::open_with_tz(path.to_str().unwrap(), 0, "+0 hours".to_string()).unwrap(),
+        );
+        let t = UsageTracker::new(storage.clone());
+
+        // Seed the rollup the way consolidate_deleted would (direct SQL:
+        // storage's conn is private to the storage module).
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO deleted_usage (model, requests, prompt_tokens, completion_tokens, merged_at)
+                 VALUES ('deepseek/deepseek-chat', 42, 900, 80, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        t.record("hash-a", "alice", "deepseek/deepseek-chat", 8, 2);
+
+        let active: HashSet<String> = ["hash-a".into()].into_iter().collect();
+        let stats = t.model_stats(&active, &["deepseek/deepseek-chat".to_string()], 0);
+
+        let chat = &stats.active[0];
+        assert_eq!(chat.requests, 43, "raw 1 + folded 42");
+        assert_eq!(chat.prompt_tokens, 908);
+        assert_eq!(chat.completion_tokens, 82);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -59,7 +59,7 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `handlers.rs` | `list_models`, `chat_completions` (streaming + non-streaming paths). |
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
-| `storage.rs` | usage.db schema (usage + usage_totals + deleted_usage), `record()`, `snapshot()` (per-key aggregates + per-model breakdown over raw + counters, incl. aggregated "deleted keys" rollup row), `timeline()` (time-bucketed chart data), `consolidate_aged()` (folds raw rows past retention into counters), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
+| `storage.rs` | usage.db schema (usage + usage_totals + deleted_usage), `record()`, `snapshot()` (per-key aggregates + per-model breakdown over raw + counters — real keys only), `timeline()` (time-bucketed chart data), `deleted_usage_rows()` (rollup for model stats), `consolidate_aged()` (folds raw rows past retention into counters), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
 | `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`). |
 | `webui.rs` | `/dashboard/api/*` routes: stats, stats/models, timeline, key list/generate/revoke. |
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
@@ -88,8 +88,8 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
   shifted to the configured timezone in queries. Raw rows older than
   `usage_retention_days` are folded into the `usage_totals` cumulative
   table (one row per key+model). Revoked keys idle >7d fold into the
-  `deleted_usage` rollup (per-model totals, aggregated "deleted keys" row
-  in stats). See invariants 2 and 3.
+  `deleted_usage` rollup (per-model totals) and vanish from the usage key
+  table; the rollup feeds per-model stats only. See invariants 2 and 3.
 
 ## Invariants and gotchas (project knowledge)
 
@@ -106,15 +106,17 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
    still runs either way.
 2. **Revoke keeps stats; consolidation reclaims rows.** Usage rows survive
    key revocation; `deleted` flags are derived per query by comparing
-   against `KeyManager::active_hashes()`. The dashboard shows revoked keys
-   with a "(deleted)" marker — do not filter them out of `snapshot`/
-   `timeline`. A revoked key idle longer than `STALE_DELETED_KEY_DAYS` (7d)
-   is folded by `Storage::consolidate_deleted` (run at startup + daily in
-   `serve`) into the `deleted_usage` rollup table (per-model totals) and
-   its original rows are **physically deleted** — from both `usage` and
-   `usage_totals`. `snapshot()` then surfaces the rollup as ONE aggregated
-   "deleted keys" row (flagged deleted) so all-time totals and per-model
-   spend never shrink after a revoke.
+   against `KeyManager::active_hashes()`. The dashboard shows a revoked
+   key with a "(deleted)" marker while it still has rows. A revoked key
+   idle longer than `STALE_DELETED_KEY_DAYS` (7d) is folded by
+   `Storage::consolidate_deleted` (run at startup + daily in `serve`) into
+   the `deleted_usage` rollup table (per-model totals) and its original
+   rows are **physically deleted** — from both `usage` and `usage_totals`.
+   The folded key then disappears from `snapshot()` entirely (no aggregated
+   "deleted keys" row — the usage table lists only real keys); its per-model
+   spend survives through `Storage::deleted_usage_rows`, which
+   `model_stats()` merges so Models-tab per-model totals keep counting
+   deleted keys.
 3. **Raw rows age out via retention fold.** Raw per-request rows older than
    `config.usage_retention_days` (default 14, clamped >= 7 to cover the
    chart's max range) are folded by `Storage::consolidate_aged` into

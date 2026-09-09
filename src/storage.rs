@@ -17,13 +17,6 @@ pub struct Storage {
 /// kept regardless of age.
 const STALE_DELETED_KEY_DAYS: i64 = 7;
 
-/// Pseudo key_hash identifying the aggregated "deleted keys" entry in
-/// snapshots. Contains a dash so it can never collide with a real
-/// SHA-256-hex key hash; it is not (and never was) in keys.db.
-const DELETED_BUCKET_KEY: &str = "deleted-keys-rollup";
-/// Display name for the aggregated deleted-keys entry.
-const DELETED_BUCKET_NAME: &str = "deleted keys";
-
 impl Storage {
     pub fn open_with_tz(path: &str, tz_offset_secs: i32, tz_sql: String) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open db: {e}"))?;
@@ -299,11 +292,11 @@ impl Storage {
     /// Return aggregated usage per key, with per-model breakdown.
     ///
     /// `active` holds the hashes of keys that still exist; rows for revoked
-    /// keys are kept but flagged `deleted`. Revoked keys idle longer than
-    /// `STALE_DELETED_KEY_DAYS` are folded into the `deleted_usage` rollup
-    /// by `consolidate_deleted` and surface here as one aggregated
-    /// "deleted keys" row, so their totals keep counting. Active keys are
-    /// always kept (all-time totals).
+    /// keys are kept but flagged `deleted` until `consolidate_deleted`
+    /// physically folds them into the `deleted_usage` rollup, after which
+    /// the key disappears from the table entirely (its totals live on only
+    /// in per-model stats via `deleted_usage_rows`). Active keys are always
+    /// kept (all-time totals).
     pub fn snapshot(&self, active: &HashSet<String>) -> Vec<KeyUsageRow> {
         let conn = self.conn.lock().unwrap();
 
@@ -400,67 +393,32 @@ impl Storage {
             }
         }
 
-        // Append the consolidated "deleted keys" rollup row (usage folded by
-        // `consolidate_deleted`), so long-gone keys stop cluttering the
-        // table while their totals still count. One row with per-model
-        // breakdown, flagged deleted.
-        let bucket_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM deleted_usage", [], |r| r.get(0))
-            .unwrap_or(0);
-        if bucket_count > 0 {
-            let mut bstmt = conn
-                .prepare(
-                    "SELECT model, requests, prompt_tokens, completion_tokens
-                     FROM deleted_usage
-                     ORDER BY requests DESC",
-                )
-                .unwrap();
-            let bucket_models: Vec<ModelUsageRow> = bstmt
-                .query_map([], |r| {
-                    Ok(ModelUsageRow {
-                        model: r.get(0)?,
-                        requests: r.get(1)?,
-                        prompt_tokens: r.get(2)?,
-                        completion_tokens: r.get(3)?,
-                    })
-                })
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect();
-            drop(bstmt);
-
-            let bucket_row = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(requests), 0),
-                            COALESCE(SUM(prompt_tokens), 0),
-                            COALESCE(SUM(completion_tokens), 0),
-                            MAX(merged_at)
-                     FROM deleted_usage",
-                    [],
-                    |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, i64>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                        ))
-                    },
-                )
-                .unwrap_or((0, 0, 0, None));
-
-            rows.push(KeyUsageRow {
-                key_hash: DELETED_BUCKET_KEY.to_string(),
-                key_name: DELETED_BUCKET_NAME.to_string(),
-                total_requests: bucket_row.0,
-                total_prompt_tokens: bucket_row.1,
-                total_completion_tokens: bucket_row.2,
-                last_used: bucket_row.3,
-                models: bucket_models,
-                deleted: true,
-            });
-        }
-
         rows
+    }
+
+    /// Per-model totals of keys folded by `consolidate_deleted`. Feeds
+    /// per-model stats only — the keys themselves are gone from
+    /// `snapshot()` (see its doc).
+    pub fn deleted_usage_rows(&self) -> Vec<ModelUsageRow> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT model, requests, prompt_tokens, completion_tokens
+                 FROM deleted_usage
+                 ORDER BY requests DESC",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok(ModelUsageRow {
+                model: r.get(0)?,
+                requests: r.get(1)?,
+                prompt_tokens: r.get(2)?,
+                completion_tokens: r.get(3)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     /// Return time-bucketed usage for the chart.
@@ -734,26 +692,32 @@ mod tests {
             .unwrap();
         assert_eq!(remaining, 1, "only the active key's row remains");
 
-        // Snapshot shows the rollup as one aggregated "deleted keys" row
-        // with per-model breakdown and totals intact.
+        // Folded key disappears from the snapshot entirely...
         drop(conn);
         let rows = s.snapshot(&active);
         let names: Vec<&str> = rows.iter().map(|r| r.key_name.as_str()).collect();
-        assert_eq!(names, vec!["alice", "deleted keys"]);
+        assert_eq!(
+            names,
+            vec!["alice"],
+            "folded key must not appear in snapshot"
+        );
 
-        let bucket = rows
-            .iter()
-            .find(|r| r.key_hash == DELETED_BUCKET_KEY)
-            .unwrap();
-        assert!(bucket.deleted);
-        assert_eq!(bucket.total_requests, 3);
-        assert_eq!(bucket.total_prompt_tokens, 157);
-        assert_eq!(bucket.total_completion_tokens, 33);
-        assert_eq!(bucket.models.len(), 2);
-        let gpt = bucket.models.iter().find(|m| m.model == "gpt").unwrap();
+        // ...while its per-model totals live on in the rollup.
+        let rollup = s.deleted_usage_rows();
+        assert_eq!(rollup.len(), 2);
+        let gpt = rollup.iter().find(|m| m.model == "gpt").unwrap();
         assert_eq!(
             (gpt.requests, gpt.prompt_tokens, gpt.completion_tokens),
             (2, 107, 23)
+        );
+        let claude = rollup.iter().find(|m| m.model == "claude").unwrap();
+        assert_eq!(
+            (
+                claude.requests,
+                claude.prompt_tokens,
+                claude.completion_tokens
+            ),
+            (1, 50, 10)
         );
     }
 
@@ -926,14 +890,18 @@ mod tests {
         assert_eq!(totals, 0, "aged counters must not outlive the key");
         drop(conn);
 
-        let rows = s.snapshot(&HashSet::new());
-        let bucket = rows
-            .iter()
-            .find(|r| r.key_hash == DELETED_BUCKET_KEY)
-            .unwrap();
-        assert_eq!(bucket.total_requests, 501, "raw 1 + counter 500");
-        assert_eq!(bucket.total_prompt_tokens, 9010);
-        assert_eq!(bucket.total_completion_tokens, 305);
+        // Key gone from snapshot; rollup keeps raw + counter totals.
+        assert!(s.snapshot(&HashSet::new()).is_empty());
+        let rollup = s.deleted_usage_rows();
+        assert_eq!(rollup.len(), 1);
+        assert_eq!(
+            (
+                rollup[0].requests,
+                rollup[0].prompt_tokens,
+                rollup[0].completion_tokens
+            ),
+            (501, 9010, 305)
+        );
     }
 
     #[test]
@@ -958,12 +926,18 @@ mod tests {
         let folded_again = s.consolidate_deleted(&HashSet::new()).unwrap();
         assert_eq!(folded_again, 0);
 
-        let rows = s.snapshot(&HashSet::new());
-        assert_eq!(rows.len(), 1, "both keys merge into the single bucket row");
-        let bucket = &rows[0];
-        assert_eq!(bucket.total_requests, 2);
-        assert_eq!(bucket.total_prompt_tokens, 10);
-        assert_eq!(bucket.total_completion_tokens, 4);
+        // Keys vanish from snapshot; rollup merges both into one model row.
+        assert!(s.snapshot(&HashSet::new()).is_empty());
+        let rollup = s.deleted_usage_rows();
+        assert_eq!(rollup.len(), 1);
+        assert_eq!(
+            (
+                rollup[0].requests,
+                rollup[0].prompt_tokens,
+                rollup[0].completion_tokens
+            ),
+            (2, 10, 4)
+        );
     }
 
     #[test]

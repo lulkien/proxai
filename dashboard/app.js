@@ -49,6 +49,20 @@ async function loadModels() {
 
 function renderModels(data) {
   const models = data.active || [];
+  // Card shows ALL-TIME token spend across every model ever recorded
+  // (server-provided, includes rotated-out models and deleted keys), not
+  // just the listed advertised rows. Fall back to summing rows if absent.
+  let totalTokens;
+  try {
+    totalTokens = data.total_tokens != null ? BigInt(data.total_tokens) : null;
+  } catch (e) { totalTokens = null; }
+  if (totalTokens === null) {
+    totalTokens = 0n;
+    for (const m of models) {
+      try { totalTokens += BigInt(m.prompt_tokens) + BigInt(m.completion_tokens); }
+      catch (e) { totalTokens += BigInt(Math.trunc(Number(m.prompt_tokens) + Number(m.completion_tokens))); }
+    }
+  }
   const rows = models.map(m =>
     '<tr><td class="key-name">' + esc(m.model) + '</td>'
     + '<td>' + fmtNum(m.requests) + '</td>'
@@ -62,6 +76,7 @@ function renderModels(data) {
   return '<div class="cards">'
     + '<div class="card"><div class="label">Active Models</div><div class="value">' + fmtNum(models.length) + '</div></div>'
     + '<div class="card"><div class="label">Deactivated Models</div><div class="value">' + fmtNum(data.deactivated_count || 0) + '</div></div>'
+    + '<div class="card"><div class="label">Total Token Usage</div><div class="value">' + totalTokens.toLocaleString('en') + '</div></div>'
     + '</div>'
     + table
     + '<div class="updated">Updated: ' + data.updated_at + '</div>';

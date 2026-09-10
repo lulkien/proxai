@@ -421,6 +421,26 @@ impl Storage {
         .collect()
     }
 
+    /// All-time token totals across every table: raw rows, aged counters,
+    /// and the deleted-keys rollup. Independent of which models are
+    /// currently advertised, so rotated-out models keep counting.
+    pub fn total_token_usage(&self) -> (u64, u64) {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+             FROM (
+                 SELECT prompt_tokens, completion_tokens FROM usage
+                 UNION ALL
+                 SELECT prompt_tokens, completion_tokens FROM usage_totals
+                 UNION ALL
+                 SELECT prompt_tokens, completion_tokens FROM deleted_usage
+             )",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )
+        .unwrap_or((0, 0))
+    }
+
     /// Return time-bucketed usage for the chart.
     ///
     /// `range` is one of `1d`, `7d`. 1d groups by 2-hour; 7d by day.
@@ -938,6 +958,32 @@ mod tests {
             ),
             (2, 10, 4)
         );
+    }
+
+    #[test]
+    fn total_token_usage_spans_all_tables_and_models() {
+        let s = test_storage();
+        // Raw row (recent, advertised or not — total is model-agnostic).
+        s.record("hash-a", "alice", "rotated/model", 100, 20);
+        // Aged counter for another model.
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO usage_totals (key_hash, key_name, model, requests, prompt_tokens, completion_tokens, last_used)
+                 VALUES ('hash-b', 'bob', 'aged/model', 5, 900, 90, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        // Deleted-keys rollup for a third model.
+        s.conn.lock().unwrap()
+            .execute(
+                "INSERT INTO deleted_usage (model, requests, prompt_tokens, completion_tokens, merged_at)
+                 VALUES ('gone/model', 3, 7, 4, datetime('now'))",
+                [],
+            )
+            .unwrap();
+
+        let (p, c) = s.total_token_usage();
+        assert_eq!((p, c), (1007, 114), "raw + counters + rollup all count");
     }
 
     #[test]

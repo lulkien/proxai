@@ -60,7 +60,7 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
 | `storage.rs` | usage.db schema (usage + usage_totals + deleted_usage), `record()`, `snapshot()` (per-key aggregates + per-model breakdown over raw + counters — real keys only), `timeline()` (time-bucketed chart data), `deleted_usage_rows()` (rollup for model stats), `consolidate_aged()` (folds raw rows past retention into counters), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
-| `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`). |
+| `metrics.rs` | `UsageTracker` (Arc<Storage> wrapper), serde snapshot structs served to dashboard/admin. `model_stats()` builds the Models tab rows (token fields serialize as JSON strings — BigInt-safe, see `token_as_string`) plus `total_tokens`: an all-time, model-agnostic token total (raw + counters + deleted rollup) so rotated-out models keep counting. |
 | `webui.rs` | `/dashboard/api/*` routes: stats, stats/models, timeline, key list/generate/revoke. |
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
 | `client.rs` | CLI side of the admin socket (generate/list/revoke key). |

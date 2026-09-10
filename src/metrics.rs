@@ -52,10 +52,15 @@ pub struct ModelStatEntry {
 
 /// Dashboard Models tab payload: one row per advertised model (zero-filled
 /// when unused) plus the count of discovered-but-not-advertised models.
+/// `total_tokens` is the all-time sum across every model ever recorded
+/// (including rotated-out ones and the deleted-keys rollup) — not just the
+/// listed rows. Serialized as a JSON string (see `token_as_string`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelStats {
     pub active: Vec<ModelStatEntry>,
     pub deactivated_count: usize,
+    #[serde(serialize_with = "token_as_string")]
+    pub total_tokens: u64,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -212,6 +217,10 @@ impl UsageTracker {
         ModelStats {
             active: rows,
             deactivated_count,
+            total_tokens: {
+                let (p, c) = self.storage.total_token_usage();
+                p + c
+            },
             updated_at: Utc::now(),
         }
     }

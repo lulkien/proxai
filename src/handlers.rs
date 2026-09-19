@@ -1,4 +1,8 @@
-use crate::{error::ProxyError, error::Result, server::ProxyState};
+use crate::{
+    error::{ProxyError, Result},
+    model_meta::{AdvertisedModel, ModelEntry, ModelList},
+    server::ProxyState,
+};
 use axum::{
     Extension, Json,
     body::Body,
@@ -8,24 +12,19 @@ use axum::{
 };
 use futures::StreamExt;
 use serde_json::Value;
+use std::collections::HashMap;
 use tracing::{debug, error};
 
-use crate::server::{ModelEntry, ModelList, strip_provider_prefix};
+/// Every advertised model, each entry re-serving the upstream `/models`
+/// entry's own properties (see `model_meta::AdvertisedModel::entry`).
+pub fn model_entries(models: &HashMap<String, AdvertisedModel>) -> Vec<ModelEntry> {
+    models.iter().map(|(id, model)| model.entry(id)).collect()
+}
 
 pub async fn list_models(State(state): State<ProxyState>) -> impl IntoResponse {
-    let data: Vec<ModelEntry> = state
-        .models
-        .iter()
-        .map(|(id, owner)| ModelEntry {
-            id: id.clone(),
-            object: "model".into(),
-            owned_by: owner.clone(),
-        })
-        .collect();
-
     let list = ModelList {
         object: "list".into(),
-        data,
+        data: model_entries(&state.models),
     };
 
     (StatusCode::OK, Json(list))
@@ -48,26 +47,28 @@ pub async fn chat_completions(
 
     debug!("Request for model: {model}");
 
-    let provider = {
-        let owner = state
-            .models
-            .get(&model)
-            .ok_or_else(|| ProxyError::UnknownModel(model.clone()))?;
-        state
-            .config
-            .providers
-            .iter()
-            .find(|p| &p.name == owner)
-            .ok_or_else(|| ProxyError::UnknownModel(model.clone()))?
-    };
+    // Advertised record: which provider to route to, and the upstream id to
+    // forward. The stored id is authoritative — the namespaced id cannot be
+    // stripped back to it, because a provider's own ids may already carry its
+    // name (nvidia/nemotron-…).
+    let advertised = state
+        .models
+        .get(&model)
+        .ok_or_else(|| ProxyError::UnknownModel(model.clone()))?;
+    let provider = state
+        .config
+        .providers
+        .iter()
+        .find(|p| p.name == advertised.provider)
+        .ok_or_else(|| ProxyError::UnknownModel(model.clone()))?;
 
-    // Strip namespace prefix for upstream (deepseek/gpt-4o -> gpt-4o)
-    let upstream_model = strip_provider_prefix(&model, &provider.name);
-    if upstream_model != model.as_str() {
-        body_json
-            .as_object_mut()
-            .unwrap()
-            .insert("model".into(), Value::String(upstream_model.to_string()));
+    if advertised.upstream_id != model
+        && let Some(obj) = body_json.as_object_mut()
+    {
+        obj.insert(
+            "model".into(),
+            Value::String(advertised.upstream_id.clone()),
+        );
     }
 
     debug!(
@@ -260,6 +261,49 @@ fn append_tail(buf: &mut String, s: &str, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_entries_re_serve_upstream_properties() {
+        let entry = serde_json::json!({
+            "id": "bonsai-27b",
+            "object": "model",
+            "owned_by": "llamacpp",
+            "aliases": ["bonsai-27b"],
+            "meta": {"n_ctx": 131072, "n_ctx_train": 262144},
+        });
+        let models = HashMap::from([(
+            "localai/bonsai-27b".to_string(),
+            AdvertisedModel::from_entry("localai", "bonsai-27b", &entry),
+        )]);
+
+        let list = ModelList {
+            object: "list".into(),
+            data: model_entries(&models),
+        };
+        let payload = serde_json::to_value(list).unwrap();
+        let item = &payload["data"][0];
+
+        assert_eq!(item["id"], "localai/bonsai-27b");
+        assert_eq!(item["object"], "model");
+        assert_eq!(item["owned_by"], "localai");
+        assert_eq!(item["context_length"], 131072);
+        assert_eq!(item["aliases"][0], "bonsai-27b");
+        assert_eq!(item["meta"]["n_ctx"], 131072);
+    }
+
+    #[test]
+    fn model_entries_omit_unknown_context_length() {
+        // DeepSeek-shaped entry: nothing to advertise but id/object/owner.
+        let entry = serde_json::json!({"id": "m", "object": "model", "owned_by": "deepseek"});
+        let models = HashMap::from([(
+            "deepseek/m".to_string(),
+            AdvertisedModel::from_entry("deepseek", "m", &entry),
+        )]);
+
+        let payload = serde_json::to_value(model_entries(&models)).unwrap();
+        assert!(payload[0].get("context_length").is_none());
+        assert_eq!(payload[0]["id"], "deepseek/m");
+    }
 
     #[test]
     fn sse_usage_tokens_parses_final_usage_chunk() {

@@ -1,10 +1,11 @@
 use crate::{
     auth,
-    config::Config,
+    config::{Config, Provider},
     error::{ProxyError, Result},
     handlers,
     key_manager::KeyManager,
     metrics::UsageTracker,
+    model_meta::{self, AdvertisedModel},
     storage::Storage,
 };
 use axum::{
@@ -16,16 +17,21 @@ use axum::{
     routing::{get, post},
 };
 use reqwest::Client;
-use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    sync::Arc,
+};
 use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct ProxyState {
     pub client: Client,
     pub config: Arc<Config>,
-    pub models: Arc<HashMap<String, String>>,
+    /// Advertised model id (namespaced) -> record holding the provider it
+    /// routes to, the upstream id to forward, and the upstream entry's own
+    /// properties (re-served on `/v1/models`).
+    pub models: Arc<HashMap<String, AdvertisedModel>>,
     pub tracker: Arc<UsageTracker>,
 }
 
@@ -34,36 +40,10 @@ pub struct ProxyState {
 /// by its allowlist. The latter are counted for the dashboard's
 /// "deactivated models" card.
 pub struct ModelDiscovery {
-    pub advertised: HashMap<String, String>,
+    pub advertised: HashMap<String, AdvertisedModel>,
     /// Namespaced ids the provider offered but that its `models` allowlist
     /// filtered out (discovered but not advertised).
     pub inactive: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct ModelEntry {
-    pub id: String,
-    pub object: String,
-    pub owned_by: String,
-}
-
-#[derive(Serialize)]
-pub struct ModelList {
-    pub object: String,
-    pub data: Vec<ModelEntry>,
-}
-
-/// Build the namespaced model id used internally: "provider/model".
-/// Namespacing avoids collisions when two providers expose the same model id.
-pub fn namespace_model(provider: &str, model: &str) -> String {
-    format!("{provider}/{model}")
-}
-
-/// Strip the "provider/" prefix from a namespaced model id, if present.
-/// Returns the model id unchanged when it has no provider prefix.
-pub fn strip_provider_prefix<'a>(model: &'a str, provider: &str) -> &'a str {
-    let prefix = format!("{provider}/");
-    model.strip_prefix(&prefix).unwrap_or(model)
 }
 
 pub async fn serve(config_path: &str, key_db: &str, socket_path: &str) -> Result<()> {
@@ -301,38 +281,35 @@ pub async fn discover_models(client: &Client, config: &Config) -> ModelDiscovery
                 if resp.status().is_success() {
                     match resp.json::<Value>().await {
                         Ok(json) => {
-                            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                                let discovered: Vec<&str> = data
-                                    .iter()
-                                    .filter_map(|e| e.get("id").and_then(|i| i.as_str()))
-                                    .collect();
-                                let advertised = select_models(&discovered, &provider.models);
+                            let discovered = discovered_ids(&json);
 
-                                // Preferred models the provider doesn't offer
-                                // are skipped, not fatal.
-                                for want in &provider.models {
-                                    if !discovered.iter().any(|id| id == want) {
-                                        warn!(
-                                            "Provider {} does not offer preferred model '{}' — skipped",
-                                            provider.name, want
-                                        );
-                                    }
-                                }
-
-                                for id in advertised {
-                                    let namespaced = namespace_model(&provider.name, id);
-                                    info!("  + {namespaced}");
-                                    map.insert(namespaced, provider.name.clone());
-                                }
-                                // Discovered but filtered out by the allowlist:
-                                // counted (not advertised) for the dashboard.
-                                for id in discovered {
-                                    let namespaced = namespace_model(&provider.name, id);
-                                    if !map.contains_key(&namespaced) {
-                                        inactive.push(namespaced);
-                                    }
+                            // Preferred models the provider doesn't offer
+                            // are skipped, not fatal.
+                            for want in &provider.models {
+                                if !discovered.iter().any(|id| id == want) {
+                                    warn!(
+                                        "Provider {} does not offer preferred model '{}' — skipped",
+                                        provider.name, want
+                                    );
                                 }
                             }
+
+                            let (found, filtered) = select_from_payload(provider, &json);
+                            for (namespaced, model) in &found {
+                                match model_meta::find_context_length(&model.properties) {
+                                    Some((length, key)) => {
+                                        info!("  + {namespaced} (context {length} from {key})");
+                                    }
+                                    None => info!(
+                                        "  + {namespaced} (no context window reported by {})",
+                                        provider.name
+                                    ),
+                                }
+                            }
+                            map.extend(found);
+                            // Discovered but filtered out by the allowlist:
+                            // counted (not advertised) for the dashboard.
+                            inactive.extend(filtered);
                         }
                         Err(e) => {
                             warn!("Failed to parse models from {}: {e}", provider.name);
@@ -355,6 +332,25 @@ pub async fn discover_models(client: &Client, config: &Config) -> ModelDiscovery
         }
     }
 
+    // Models whose provider reports no window are the ones clients still have
+    // to guess at; name them so the gap shows up in the journal instead of
+    // silently becoming a client-side default.
+    for (id, model) in &map {
+        if model.context_length().is_none() {
+            warn!("  ! {id} advertises no context window — clients fall back to their own default");
+        }
+    }
+    let with_window = map
+        .values()
+        .filter(|m| m.context_length().is_some())
+        .count();
+    if !map.is_empty() {
+        info!(
+            "Context windows: {with_window}/{} advertised model(s) report one",
+            map.len()
+        );
+    }
+
     if map.is_empty() {
         warn!("No models discovered — proxy will reject all chat requests");
     } else {
@@ -371,6 +367,65 @@ pub async fn discover_models(client: &Client, config: &Config) -> ModelDiscovery
         advertised: map,
         inactive,
     }
+}
+
+/// Upstream model ids listed by a provider's `/models` payload.
+fn discovered_ids(payload: &Value) -> Vec<&str> {
+    payload
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|data| {
+            data.iter()
+                .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Advertised models for one provider's `/models` payload: namespaced id ->
+/// record, plus the ids its allowlist filtered out. Each record keeps the
+/// upstream entry's own properties so `/v1/models` can re-serve them, and the
+/// upstream id so requests are forwarded without re-deriving it.
+fn select_from_payload(
+    provider: &Provider,
+    payload: &Value,
+) -> (HashMap<String, AdvertisedModel>, Vec<String>) {
+    let Some(data) = payload.get("data").and_then(|d| d.as_array()) else {
+        return (HashMap::new(), Vec::new());
+    };
+    let ids: Vec<&str> = data
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+        .collect();
+    let keep: HashSet<&str> = select_models(&ids, &provider.models).into_iter().collect();
+
+    let mut advertised = HashMap::new();
+    let mut filtered = Vec::new();
+    for entry in data {
+        let Some(upstream_id) = entry.get("id").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        let namespaced = model_meta::namespace_model(&provider.name, upstream_id);
+        if !keep.contains(upstream_id) {
+            filtered.push(namespaced);
+            continue;
+        }
+        match advertised.entry(namespaced) {
+            Entry::Occupied(existing) => warn!(
+                "Provider {} advertises {} twice (upstream ids collide after namespacing) — keeping the first",
+                provider.name,
+                existing.key()
+            ),
+            Entry::Vacant(slot) => {
+                slot.insert(AdvertisedModel::from_entry(
+                    &provider.name,
+                    upstream_id,
+                    entry,
+                ));
+            }
+        }
+    }
+    (advertised, filtered)
 }
 
 /// The subset of a provider's discovered model ids to advertise.
@@ -392,39 +447,87 @@ fn select_models<'a>(discovered: &[&'a str], preferred: &[String]) -> Vec<&'a st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn provider(name: &str, models: &[&str]) -> Provider {
+        Provider {
+            name: name.to_string(),
+            url: format!("http://{name}.test/v1"),
+            api_key: "sk-test".to_string(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+        }
+    }
 
     #[test]
-    fn namespace_model_prepends_provider() {
-        assert_eq!(
-            namespace_model("deepseek", "deepseek-chat"),
-            "deepseek/deepseek-chat"
+    fn select_from_payload_keeps_upstream_properties_and_limits() {
+        let payload = json!({"data": [
+            {"id": "bonsai-27b", "object": "model", "owned_by": "llamacpp",
+             "aliases": ["bonsai-27b"], "meta": {"n_ctx": 131072}},
+            {"id": "other", "object": "model"},
+        ]});
+        let (advertised, filtered) =
+            select_from_payload(&provider("localai", &["bonsai-27b"]), &payload);
+
+        assert_eq!(filtered, vec!["localai/other"]);
+        let model = &advertised["localai/bonsai-27b"];
+        assert_eq!(model.provider, "localai");
+        assert_eq!(model.upstream_id, "bonsai-27b");
+        assert_eq!(model.context_length(), Some(131072));
+        assert!(
+            model.properties.contains_key("aliases"),
+            "properties are kept verbatim"
+        );
+        assert!(
+            !model.properties.contains_key("id"),
+            "id belongs to the proxy"
         );
     }
 
     #[test]
-    fn strip_provider_prefix_removes_provider() {
+    fn select_from_payload_without_allowlist_advertises_everything() {
+        let payload = json!({"data": [{"id": "a"}, {"id": "b"}]});
+        let (advertised, filtered) = select_from_payload(&provider("p", &[]), &payload);
+        assert_eq!(advertised.len(), 2);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn select_from_payload_dedups_provider_prefix() {
+        let payload = json!({"data": [{"id": "nvidia/nemotron-3-super-120b-a12b"}]});
+        let (advertised, filtered) = select_from_payload(&provider("nvidia", &[]), &payload);
+        assert!(advertised.contains_key("nvidia/nemotron-3-super-120b-a12b"));
+        assert!(filtered.is_empty());
         assert_eq!(
-            strip_provider_prefix("deepseek/deepseek-chat", "deepseek"),
-            "deepseek-chat"
+            advertised["nvidia/nemotron-3-super-120b-a12b"].upstream_id,
+            "nvidia/nemotron-3-super-120b-a12b"
         );
     }
 
     #[test]
-    fn strip_provider_prefix_keeps_unprefixed_model() {
-        assert_eq!(
-            strip_provider_prefix("deepseek-chat", "deepseek"),
-            "deepseek-chat"
-        );
+    fn select_from_payload_keeps_first_on_namespace_collision() {
+        let payload = json!({"data": [
+            {"id": "x", "owned_by": "first"},
+            {"id": "nvidia/x", "owned_by": "second"},
+        ]});
+        let (advertised, filtered) = select_from_payload(&provider("nvidia", &[]), &payload);
+        assert_eq!(advertised.len(), 1);
+        assert_eq!(advertised["nvidia/x"].upstream_id, "x");
+        assert!(filtered.is_empty(), "a collision is not a deactivation");
     }
 
     #[test]
-    fn strip_provider_prefix_does_not_false_match_prefix() {
-        // "deep" is a prefix of "deepseek"; a shorter provider name must not
-        // strip the wrong prefix.
-        assert_eq!(
-            strip_provider_prefix("deepseek/deepseek-chat", "deep"),
-            "deepseek/deepseek-chat"
-        );
+    fn select_from_payload_ignores_entries_without_an_id() {
+        let payload = json!({"data": [{"object": "model"}, {"id": "real"}]});
+        let (advertised, _) = select_from_payload(&provider("p", &[]), &payload);
+        assert_eq!(advertised.len(), 1);
+        assert!(advertised.contains_key("p/real"));
+    }
+
+    #[test]
+    fn discovered_ids_lists_upstream_ids() {
+        let payload = json!({"data": [{"id": "a"}, {"object": "model"}, {"id": "b"}]});
+        assert_eq!(discovered_ids(&payload), vec!["a", "b"]);
+        assert!(discovered_ids(&json!({"object": "list"})).is_empty());
     }
 
     #[test]

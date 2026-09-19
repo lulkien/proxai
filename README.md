@@ -6,7 +6,7 @@ OpenAI-compatible API proxy with multi-provider routing, key management, and a s
 
 - **Multi-provider routing** -- route requests to DeepSeek, Kimi, OpenAI, etc. based on model name
 - **API key auth** -- generate and manage client API keys (SHA-256 hashed, stored in SQLite)
-- **Dynamic model discovery** -- auto-discovers models from upstream providers at startup
+- **Dynamic model discovery** -- auto-discovers models from upstream providers at startup and re-advertises each one's own metadata (context window included) on `/v1/models`, so clients read the real limits instead of guessing
 - **Rate limiting** -- 20 failed auth attempts per IP in 60s returns 429
 - **Admin socket** -- abstract-namespace Unix socket RPC (`@proxai`) for key management (no API key needed)
 - **Usage tracking** -- per-key request counts persisted in SQLite

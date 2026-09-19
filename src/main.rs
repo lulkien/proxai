@@ -8,6 +8,7 @@ mod error;
 mod handlers;
 mod key_manager;
 mod metrics;
+mod model_meta;
 mod server;
 mod storage;
 mod webui;

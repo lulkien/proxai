@@ -55,8 +55,9 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | Module | Responsibility |
 |---|---|
 | `main.rs` | mod decls, tracing init (`proxai=info` default), clap dispatch. No subcommand = `serve config.toml keys.db proxai` (@proxai). |
-| `server.rs` | `ProxyState` (reqwest Client, Arc<Config>, Arc<HashMap<model_id, provider>>, Arc<UsageTracker>), axum router, model discovery, embedded-asset serving, MIME mapping. |
-| `handlers.rs` | `list_models`, `chat_completions` (streaming + non-streaming paths). |
+| `server.rs` | `ProxyState` (reqwest Client, Arc<Config>, Arc<HashMap<model_id, `AdvertisedModel`>>, Arc<UsageTracker>), axum router, model discovery (upstream `/models` -> per-model record + properties), embedded-asset serving, MIME mapping. |
+| `model_meta.rs` | Namespaced model ids (`provider/upstream-id`, provider-prefix de-duplicated), context-window extraction from upstream properties, `AdvertisedModel` + `ModelEntry`/`ModelList` wire types. |
+| `handlers.rs` | `list_models` (re-serves upstream properties), `chat_completions` (streaming + non-streaming paths, forwards the stored upstream id). |
 | `auth.rs` | `require_api_key` middleware, per-IP rate limiter, injects `AuthInfo {key_hash, key_name}` extension. |
 | `key_manager.rs` | keys.db CRUD, SHA-256 hashing, keys.json auto-migration. Errors are `Result<_, String>`. |
 | `storage.rs` | usage.db schema (usage + usage_totals + deleted_usage), `record()`, `snapshot()` (per-key aggregates + per-model breakdown over raw + counters — real keys only), `timeline()` (time-bucketed chart data), `deleted_usage_rows()` (rollup for model stats), `consolidate_aged()` (folds raw rows past retention into counters), `consolidate_deleted()` (folds stale revoked keys into rollup + deletes rows). Errors `Result<_, String>`. |
@@ -95,11 +96,17 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 
 1. **Model ids are namespaced `provider/model`.** Discovered from each
    provider's `/models` at startup and stored as `HashMap<namespaced_id,
-   provider_name>` (see `ModelDiscovery` — discovery also returns the
+   AdvertisedModel>` (see `ModelDiscovery` — discovery also returns the
    allowlist-filtered ids, counted as "deactivated" on the dashboard).
-   Requests must use the namespaced id; the prefix is
-   stripped before forwarding upstream. Route resolution: `models` map ->
-   provider config by name. Usage rows are recorded under the namespaced id.
+   `AdvertisedModel` carries the provider to route to, the **upstream id** to
+   forward, and the upstream entry's own properties. A provider whose own ids
+   already start with its name (NVIDIA: `nvidia/nemotron-…`) is **not**
+   prefixed twice, so the upstream id is stored rather than re-derived by
+   stripping — stripping `nvidia/nemotron-…` would send the wrong model
+   upstream. Requests must use the namespaced id (anything else is
+   `UnknownModel`). Route resolution:
+   `models` map -> provider config by name. Usage rows are recorded under the
+   namespaced id.
    A provider's optional `models` array (config, `#[serde(default)]` empty)
    restricts advertising to those upstream ids **that the provider actually
    offers** — missing preferred ids are skipped with a warning, discovery
@@ -184,6 +191,22 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 16. **reqwest client**: rustls (no OpenSSL), 120 s timeout, JSON + stream
     features. The same `Client` in `ProxyState` serves both discovery and
     proxying.
+17. **`/v1/models` re-serves what the provider advertises.** Entries are built
+    by `model_meta::AdvertisedModel::entry`: the upstream entry's own
+    properties ride through verbatim (`#[serde(flatten)] properties`), and only
+    `id` (namespaced), `object` (`"model"`) and `owned_by` (the provider name)
+    belong to the proxy. A canonical `context_length` is derived from the
+    upstream window keys (`context_length`, `max_model_len`, `n_ctx`, …)
+    **only when the upstream entry does not already carry one**; served or
+    allocated keys outrank trained maxima (`n_ctx` 131072 before `n_ctx_train`
+    262144 — advertising the trained value lets a client overrun the served
+    window), values outside 1024..=10_000_000 are rejected as junk, and
+    `max_tokens` is never read as a window. A model whose provider reports no
+    window advertises none and is named in a startup `warn!`. There are
+    deliberately **no** config overrides, no metadata catalog and no window
+    enforcement/trimming: metadata is routed, never invented. Adding a derived
+    key here is a wire-format change — check the dashboard payload rules
+    (invariant 2) before extending it.
 
 ## Change checklists
 

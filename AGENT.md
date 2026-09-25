@@ -136,10 +136,16 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
 4. **Streaming token counting.** `handlers.rs` forces
    `stream_options.include_usage=true` upstream, tees the response body
    through a bounded `mpsc` channel (capacity 16) while a spawned task keeps
-   only the trailing 64 KiB (UTF-8-safe via `append_tail`) of the SSE text,
-   then parses the final `usage` chunk with `sse_usage_tokens`. Status,
-   `content-type`, and `transfer-encoding` are passed through; the client
-   body must stay byte-transparent.
+   only the trailing 64 KiB of raw SSE bytes (`UsageCapture`), trimmed at a
+   line boundary, and parses the final `usage` event with
+   `sse_usage_tokens`. Chunks are socket reads, so `UsageCapture` holds bytes
+   and decodes **per line at parse time, never per chunk**: a chunk may end
+   inside a line or a multi-byte character, and both halves of such a split
+   are invalid UTF-8 on their own — a per-chunk decode dropped them and
+   recorded the request as 0/0. A line that is not valid UTF-8 is skipped
+   without discarding its neighbours. Status, `content-type`, and
+   `transfer-encoding` are passed through; the client body must stay
+   byte-transparent.
 5. **Admin socket is unauthenticated** — it lives in the Linux abstract
    namespace as `@proxai` (default; override with `--socket <name>`).
    Abstract sockets have no filesystem path, so there is no stale-file

@@ -134,14 +134,14 @@ pub async fn chat_completions(
         let model = model.clone();
         let auth = auth.clone();
         tokio::spawn(async move {
-            let mut buf = String::new();
+            let mut capture = UsageCapture::default();
             let mut stream = upstream_response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(bytes) => {
-                        if let Ok(s) = std::str::from_utf8(&bytes) {
-                            append_tail(&mut buf, s, 64 * 1024);
-                        }
+                        // Accounting tee only — `bytes` is sent on unchanged, so
+                        // the client body stays byte-transparent either way.
+                        capture.push(&bytes);
                         if tx.send(Ok(bytes)).await.is_err() {
                             break; // client disconnected
                         }
@@ -155,7 +155,7 @@ pub async fn chat_completions(
             }
             // Count tokens from whatever usage chunk(s) we captured.
             if let Some(a) = auth {
-                let (pt, ct) = sse_usage_tokens(&buf);
+                let (pt, ct) = capture.finish();
                 tracker.record(&a.key_hash, &a.key_name, &model, pt, ct);
             }
         });
@@ -215,13 +215,83 @@ pub async fn chat_completions(
     Ok(response.body(Body::from(body_bytes.to_vec())).unwrap())
 }
 
-/// Extract (prompt_tokens, completion_tokens) from an SSE response body.
-/// Upstream sends usage in a final `data: {...}` chunk when
+/// Trailing window of a streamed SSE response, kept for token accounting.
+///
+/// A chunk is whatever one socket read produced: it can begin and end
+/// anywhere, including inside a line or a UTF-8 code point. Bytes are
+/// therefore held as bytes and decoded *per line* at parse time. Decoding a
+/// chunk on its own and dropping it when that fails lost the `usage` event
+/// whenever a boundary landed inside a multi-byte character — the chunks
+/// either side of such a boundary are both invalid UTF-8 alone, so both
+/// vanished and the request was recorded as 0/0. SSE `usage` arrives last,
+/// so only the tail is kept.
+#[derive(Default)]
+struct UsageCapture {
+    pending: Vec<u8>,
+    chunks: u64,
+    mid_line_chunks: u64,
+}
+
+/// Cap on the captured tail. Upstream sends usage in the final event, so a
+/// window this size always contains it.
+const USAGE_CAPTURE_MAX: usize = 64 * 1024;
+
+impl UsageCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        self.chunks += 1;
+        if self.pending.len() > USAGE_CAPTURE_MAX {
+            self.trim();
+        }
+        // Bytes after the last `\n` are an unfinished line, held until the
+        // chunk that completes it arrives. Counting these is the only way to
+        // see that real traffic exercises a mid-line boundary.
+        if !self.pending.is_empty() && self.pending.last() != Some(&b'\n') {
+            self.mid_line_chunks += 1;
+        }
+    }
+
+    /// Drop everything before the last `USAGE_CAPTURE_MAX` bytes, starting at
+    /// the first line boundary inside the window so whole lines are kept.
+    fn trim(&mut self) {
+        let cut = self.pending.len() - USAGE_CAPTURE_MAX;
+        let start = match self.pending[cut..].iter().position(|b| *b == b'\n') {
+            Some(offset) => cut + offset + 1,
+            // No terminator in the window (one enormous line): keep the raw
+            // tail — the parser skips a fragment that cannot be a `data:` line.
+            None => cut,
+        };
+        self.pending.drain(..start);
+    }
+
+    /// Tracked tokens from the captured tail. A last line without a
+    /// terminator is still a line; the stream may have ended mid-line.
+    fn finish(self) -> (u64, u64) {
+        if self.mid_line_chunks > 0 {
+            debug!(
+                chunks = self.chunks,
+                mid_line_chunks = self.mid_line_chunks,
+                held = self.pending.len(),
+                "streaming usage capture saw chunk(s) ending mid-line"
+            );
+        }
+        sse_usage_tokens(&self.pending)
+    }
+}
+
+/// Extract (prompt_tokens, completion_tokens) from a streamed SSE body.
+/// Upstream sends usage in a final `data: {...}` event when
 /// `stream_options.include_usage` is enabled.
-fn sse_usage_tokens(body: &str) -> (u64, u64) {
+///
+/// Decodes per line: a line that is not valid UTF-8 is not something that can
+/// be read, and skipping it must not discard the lines around it.
+fn sse_usage_tokens(body: &[u8]) -> (u64, u64) {
     let mut prompt = 0u64;
     let mut completion = 0u64;
-    for line in body.lines() {
+    for raw in body.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(raw) else {
+            continue;
+        };
         let line = line.trim();
         let Some(data) = line.strip_prefix("data:") else {
             continue;
@@ -242,20 +312,6 @@ fn sse_usage_tokens(body: &str) -> (u64, u64) {
         }
     }
     (prompt, completion)
-}
-
-/// Append `s` to `buf`, keeping only the trailing `max` bytes (UTF-8 safe).
-/// SSE usage arrives in the final chunk, so only the tail matters for counting.
-fn append_tail(buf: &mut String, s: &str, max: usize) {
-    buf.push_str(s);
-    if buf.len() <= max {
-        return;
-    }
-    let mut start = buf.len() - max;
-    while !buf.is_char_boundary(start) {
-        start -= 1;
-    }
-    buf.drain(..start);
 }
 
 #[cfg(test)]
@@ -311,25 +367,156 @@ mod tests {
                     data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n\
                     data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n\
                     data: [DONE]\n\n";
-        assert_eq!(sse_usage_tokens(body), (11, 7));
+        assert_eq!(sse_usage_tokens(body.as_bytes()), (11, 7));
     }
 
     #[test]
     fn sse_usage_tokens_no_usage_is_zero() {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
-        assert_eq!(sse_usage_tokens(body), (0, 0));
+        assert_eq!(sse_usage_tokens(body.as_bytes()), (0, 0));
     }
 
     #[test]
-    fn append_tail_truncates_utf8_safely() {
-        let mut buf = String::new();
-        append_tail(&mut buf, "abc", 10);
-        assert_eq!(buf, "abc");
+    fn sse_usage_tokens_skips_only_the_undecodable_line() {
+        // A line that is not valid UTF-8 cannot be read, but skipping it must
+        // not discard the lines around it.
+        let body: Vec<u8> = [
+            &b"data: {\"choices\":[{\"delta\":{\"content\":\"\xff\xfe\"}}]}\n\n"[..],
+            &b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\n"
+                [..],
+        ]
+        .concat();
+        assert_eq!(sse_usage_tokens(&body), (3, 4));
+    }
 
-        // "aaéé" is 6 bytes (é = 2 bytes); truncating to 3 bytes must back up
-        // to a char boundary rather than splitting the multi-byte char.
-        let mut buf = String::new();
-        append_tail(&mut buf, "aaéé", 3);
-        assert_eq!(buf, "éé");
+    /// Feed chunks through the capture exactly as the streaming task does.
+    fn capture_of(chunks: &[&[u8]]) -> (u64, u64) {
+        let mut capture = UsageCapture::default();
+        for chunk in chunks {
+            capture.push(chunk);
+        }
+        capture.finish()
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("needle is present in the fixture")
+    }
+
+    /// A streamed reply shaped like the real thing: non-ASCII content events,
+    /// then upstream's `usage` event, then `[DONE]`.
+    fn stream_with_multibyte_content() -> Vec<u8> {
+        [
+            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"café ☕\"}}]}\n\n",
+            "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    #[test]
+    fn usage_survives_chunk_split_inside_a_multibyte_char() {
+        // The boundary — a socket read, not a line — lands inside 'é'. Both
+        // halves are invalid UTF-8 on their own, which used to drop the whole
+        // capture, usage event included, and record the request as 0/0.
+        let stream = stream_with_multibyte_content();
+        let split = find(&stream, "é".as_bytes()) + 1;
+        assert!(std::str::from_utf8(&stream[..split]).is_err());
+
+        assert_eq!(capture_of(&[&stream[..split], &stream[split..]]), (11, 7));
+    }
+
+    #[test]
+    fn usage_survives_split_inside_the_usage_event() {
+        let stream = stream_with_multibyte_content();
+        let split = find(&stream, b"\"prompt_tokens\"") + 3;
+
+        assert_eq!(capture_of(&[&stream[..split], &stream[split..]]), (11, 7));
+    }
+
+    #[test]
+    fn usage_survives_a_read_that_coalesces_content_and_usage() {
+        // One socket read carrying the tail of a content event plus the whole
+        // usage event, with the previous boundary mid-character.
+        let stream = stream_with_multibyte_content();
+        let split = find(&stream, "é".as_bytes()) + 1;
+        let usage = find(&stream, b"data: {\"choices\":[],\"usage\"");
+        let mid = usage + 40;
+
+        assert_eq!(
+            capture_of(&[&stream[..split], &stream[split..mid], &stream[mid..]]),
+            (11, 7)
+        );
+    }
+
+    #[test]
+    fn usage_survives_every_single_split_offset() {
+        let stream = stream_with_multibyte_content();
+        let mut mid_character_offsets = 0;
+
+        for offset in 1..stream.len() {
+            if std::str::from_utf8(&stream[..offset]).is_err() {
+                mid_character_offsets += 1;
+            }
+            assert_eq!(
+                capture_of(&[&stream[..offset], &stream[offset..]]),
+                (11, 7),
+                "split at byte {offset} lost the usage event"
+            );
+        }
+
+        // The fixture must actually contain the offsets that exercise the
+        // multi-byte case, or this test proves nothing about it.
+        assert!(mid_character_offsets >= 2);
+    }
+
+    #[test]
+    fn capture_counts_only_chunks_that_end_mid_line() {
+        let mut capture = UsageCapture::default();
+        capture.push(b"");
+        capture.push(b"data: {\"choices\":[]}\n\n");
+        assert_eq!(capture.mid_line_chunks, 0);
+
+        capture.push(b"data: {\"choi");
+        assert_eq!(capture.mid_line_chunks, 1);
+    }
+
+    #[test]
+    fn capture_keeps_a_bounded_tail_of_whole_lines() {
+        let filler = b"data: {\"choices\":[{\"delta\":{\"content\":\"...\"}}]}\n\n";
+        let mut stream = b"junk line without usage\n".to_vec();
+        let mut capture = UsageCapture::default();
+        capture.push(&stream);
+        for _ in 0..4096 {
+            stream.extend_from_slice(filler);
+            capture.push(filler);
+        }
+
+        assert!(capture.pending.len() <= USAGE_CAPTURE_MAX);
+        // The window is a suffix of what was pushed that starts right after a
+        // terminator — whole lines, never a fragment of one.
+        assert!(stream.ends_with(&capture.pending));
+        let dropped = stream.len() - capture.pending.len();
+        assert!(dropped > 0, "the fixture must exceed the window");
+        assert_eq!(stream[dropped - 1], b'\n');
+
+        capture.push(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n",
+        );
+        assert_eq!(capture.finish(), (11, 7));
+    }
+
+    #[test]
+    fn capture_keeps_a_raw_tail_when_the_window_has_no_line_boundary() {
+        let mut capture = UsageCapture::default();
+        let blob = vec![b'x'; USAGE_CAPTURE_MAX + 10];
+        capture.push(&blob);
+
+        assert_eq!(capture.pending.len(), USAGE_CAPTURE_MAX);
+        assert_eq!(capture.finish(), (0, 0));
     }
 }

@@ -39,6 +39,13 @@ const WINDOW_KEYS: &[&str] = &[
 /// Keys the proxy owns on an advertised entry; upstream copies are dropped.
 const OWNED_KEYS: &[&str] = &["id", "object", "owned_by"];
 
+/// Whether a length could plausibly be a token window — the band clients
+/// themselves accept. Shared with the config `[model_properties]` validation,
+/// so a value proxai refuses to derive is also refused when declared by hand.
+pub fn is_plausible_window(length: u64) -> bool {
+    (MIN_WINDOW..=MAX_WINDOW).contains(&length)
+}
+
 /// Namespaced id used for routing, usage rows and `/v1/models`:
 /// `provider/upstream-id`. A provider whose own ids already carry its name
 /// (NVIDIA: `nvidia/nemotron-…`) is not prefixed twice.
@@ -48,6 +55,25 @@ pub fn namespace_model(provider: &str, model: &str) -> String {
     } else {
         format!("{provider}/{model}")
     }
+}
+
+/// The model's own name, with the provider's namespace removed when the upstream
+/// id carries it: `nvidia/nemotron-3.5` -> `nemotron-3.5` for provider `nvidia`.
+/// An id that is not prefixed with its provider's name (NVIDIA ids are, DeepSeek
+/// ids are not) is already bare and comes back unchanged.
+///
+/// This is the name a config `[model_properties]` key uses — the model as the
+/// provider calls it, not the namespaced id proxai advertises — so a table entry
+/// reads `nemotron-3.5`, never `nvidia/nemotron-3.5`.
+pub fn bare_model_name<'a>(provider: &str, model: &'a str) -> &'a str {
+    // Only a non-empty remainder counts as the bare name: an id that is nothing
+    // but the namespace has no model name to reduce to, and must not come back
+    // as an empty string that could match an empty table key.
+    model
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|name| !name.is_empty())
+        .unwrap_or(model)
 }
 
 /// One advertised model: the upstream id requests are forwarded with, plus the
@@ -80,6 +106,33 @@ impl AdvertisedModel {
     /// The context window this provider reports for the model, if any.
     pub fn context_length(&self) -> Option<u64> {
         find_context_length(&self.properties).map(|(length, _)| length)
+    }
+
+    /// Overlay operator-declared properties (config `[model_properties]`) on the
+    /// upstream entry's own. Config wins per key: filling in a window the
+    /// provider never reported and correcting one it reported wrong are the same
+    /// operation. Returns the keys that were applied (map order = sorted, so
+    /// startup logs are stable), for logging.
+    ///
+    /// `id`/`object`/`owned_by` are refused: they belong to the proxy (see
+    /// [`ModelEntry`]), and an overlay carrying them would emit them twice.
+    pub fn apply_overrides(&mut self, overrides: &Map<String, Value>) -> Vec<String> {
+        let mut applied = Vec::new();
+        for (key, value) in overrides {
+            if OWNED_KEYS
+                .iter()
+                .any(|owned| owned.eq_ignore_ascii_case(key))
+            {
+                tracing::warn!(
+                    "{}: property '{key}' is set by the proxy and cannot be overridden — ignored",
+                    self.upstream_id
+                );
+                continue;
+            }
+            self.properties.insert(key.clone(), value.clone());
+            applied.push(key.clone());
+        }
+        applied
     }
 
     /// The `/v1/models` entry for this model: our `id`/`object`/`owned_by` plus
@@ -160,9 +213,7 @@ fn plausible(value: &Value) -> Option<u64> {
         Value::String(s) => s.trim().replace(',', "").parse().ok()?,
         _ => return None,
     };
-    (MIN_WINDOW..=MAX_WINDOW)
-        .contains(&length)
-        .then_some(length)
+    is_plausible_window(length).then_some(length)
 }
 
 #[cfg(test)]
@@ -207,6 +258,40 @@ mod tests {
             namespace_model("deep", "deepseek/deepseek-chat"),
             "deep/deepseek/deepseek-chat"
         );
+    }
+
+    // ── bare model name (config [model_properties] keys) ──
+
+    #[test]
+    fn bare_model_name_strips_a_provider_prefix_the_id_carries() {
+        assert_eq!(
+            bare_model_name("nvidia", "nvidia/nemotron-3-super-120b-a12b"),
+            "nemotron-3-super-120b-a12b"
+        );
+        assert_eq!(bare_model_name("nvidia", "nemotron-3.5"), "nemotron-3.5");
+    }
+
+    #[test]
+    fn bare_model_name_keeps_ids_that_are_not_prefixed_by_their_provider() {
+        assert_eq!(
+            bare_model_name("deepseek", "deepseek-v4-pro"),
+            "deepseek-v4-pro"
+        );
+        // An org prefix that is not the provider name is part of the name.
+        assert_eq!(
+            bare_model_name("openrouter", "x-ai/grok-4.6"),
+            "x-ai/grok-4.6"
+        );
+    }
+
+    #[test]
+    fn bare_model_name_does_not_strip_a_partial_provider_match() {
+        assert_eq!(
+            bare_model_name("deep", "deepseek/deepseek-chat"),
+            "deepseek/deepseek-chat"
+        );
+        // A provider named like its own model's prefix leaves nothing behind.
+        assert_eq!(bare_model_name("nvidia", "nvidia/"), "nvidia/");
     }
 
     // ── window precedence ──
@@ -380,5 +465,100 @@ mod tests {
         let model =
             AdvertisedModel::from_entry("nvidia", "nvidia/nemotron-3-super-120b-a12b", &entry);
         assert_eq!(model.upstream_id, "nvidia/nemotron-3-super-120b-a12b");
+    }
+
+    // ── config overrides ([model_properties]) ──
+
+    fn overrides(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn override_supplies_a_window_the_provider_never_reported() {
+        // The fallback case: DeepSeek-shaped entry, window from config.
+        let entry = json!({"id": "m", "object": "model", "owned_by": "deepseek"});
+        let mut model = AdvertisedModel::from_entry("deepseek", "m", &entry);
+        assert_eq!(model.context_length(), None);
+
+        let applied = model.apply_overrides(&overrides(&[("context_length", json!(1_000_000))]));
+
+        assert_eq!(applied, vec!["context_length"]);
+        assert_eq!(model.context_length(), Some(1_000_000));
+        let out = serde_json::to_value(model.entry("deepseek/m")).unwrap();
+        assert_eq!(out["context_length"], 1_000_000);
+        // Proxy-owned fields still come from the proxy, exactly once.
+        assert_eq!(out["id"], "deepseek/m");
+        assert_eq!(out["owned_by"], "deepseek");
+        assert_eq!(out.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn override_corrects_a_window_the_provider_reported() {
+        let entry = json!({"id": "m", "context_length": 8192});
+        let mut model = AdvertisedModel::from_entry("p", "m", &entry);
+
+        model.apply_overrides(&overrides(&[("context_length", json!(131072))]));
+
+        assert_eq!(model.context_length(), Some(131072));
+        let out = serde_json::to_value(model.entry("p/m")).unwrap();
+        assert_eq!(out["context_length"], 131072);
+    }
+
+    #[test]
+    fn override_carries_arbitrary_properties_alongside_upstream_ones() {
+        let entry = json!({"id": "m", "aliases": ["m"], "meta": {"n_vocab": 248320}});
+        let mut model = AdvertisedModel::from_entry("p", "m", &entry);
+
+        model.apply_overrides(&overrides(&[
+            ("display_name", json!("My Model")),
+            ("pricing", json!({"input": 0.5})),
+        ]));
+
+        let out = serde_json::to_value(model.entry("p/m")).unwrap();
+        assert_eq!(out["display_name"], "My Model");
+        assert_eq!(out["pricing"]["input"], 0.5);
+        assert_eq!(
+            out["aliases"],
+            json!(["m"]),
+            "upstream properties the config does not name ride through"
+        );
+        assert_eq!(out["meta"]["n_vocab"], 248320);
+    }
+
+    #[test]
+    fn override_refuses_keys_the_proxy_owns() {
+        // Emitting id/object/owned_by twice would produce an entry with
+        // duplicate JSON keys.
+        let entry = json!({"id": "m", "object": "model", "owned_by": "deepseek"});
+        let mut model = AdvertisedModel::from_entry("deepseek", "m", &entry);
+
+        let applied = model.apply_overrides(&overrides(&[
+            ("id", json!("hijacked")),
+            ("object", json!("hijacked")),
+            ("owned_by", json!("hijacked")),
+            ("context_length", json!(65536)),
+        ]));
+
+        assert_eq!(applied, vec!["context_length"]);
+        let out = serde_json::to_value(model.entry("deepseek/m")).unwrap();
+        assert_eq!(out["id"], "deepseek/m");
+        assert_eq!(out["object"], "model");
+        assert_eq!(out["owned_by"], "deepseek");
+        assert_eq!(out.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn override_of_an_unreported_window_stays_within_the_proxy_band() {
+        // The band is shared with config validation; a value outside it is
+        // never derived here, and is dropped at config load before it reaches
+        // this function.
+        assert!(is_plausible_window(1_000_000));
+        assert!(!is_plausible_window(500));
+        assert!(!is_plausible_window(20_000_000));
+        assert!(is_plausible_window(MIN_WINDOW));
+        assert!(is_plausible_window(MAX_WINDOW));
     }
 }

@@ -36,3 +36,32 @@ bind = "127.0.0.1:3000"
 # name = "kimi"
 # url = "https://api.moonshot.cn/v1"
 # api_key = "«redacted:sk-…»"
+
+# Optional: per-model properties to advertise on /v1/models.
+#
+# Key = the model's own name, as its provider calls it: "deepseek-v4-pro",
+# "nemotron-3.5". NOT the namespaced id proxai advertises ("deepseek/deepseek-v4-pro").
+# A model served by one provider is just itself, so no prefix is involved.
+# Keys containing "." (or any punctuation TOML treats specially) must be
+# quoted: [model_properties."nemotron-3.5"].
+#
+# The declared properties are overlaid on whatever the provider's own /models
+# entry reported, config winning per key: a provider that reports no context
+# window (or a wrong one) can be filled in or corrected. Every other key is
+# advertised verbatim, so this table can carry any extra detail clients read.
+# id/object/owned_by belong to the proxy and cannot be overridden.
+# A key matching no advertised model, and a context_length outside the
+# plausible 1024..10000000 window band, are dropped with a startup warning.
+
+# [model_properties]
+#
+# [model_properties.deepseek-v4-pro]
+# context_length = 1000000
+# display_name = "DeepSeek V4 Pro"
+# max_output_tokens = 65536
+#
+# [model_properties.deepseek-v4-flash]
+# context_length = 131072
+#
+# [model_properties."nemotron-3.5"]
+# context_length = 262144

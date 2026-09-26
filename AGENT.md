@@ -66,7 +66,7 @@ Admin  -> abstract socket @proxai (no auth)                 -> key RPC
 | `admin.rs` | Unix-socket bincode RPC server (`AdminRequest`/`AdminResponse`), `bind()` + `run()`. |
 | `client.rs` | CLI side of the admin socket (generate/list/revoke key). |
 | `cli.rs` | clap types: `serve`, `cli` (socket), `key` (offline direct-db). |
-| `config.rs` | TOML config + `timezone_offset()` parsing. |
+| `config.rs` | TOML config, `timezone_offset()` parsing, `[model_properties]` table + window validation. |
 | `error.rs` | `ProxyError` enum -> OpenAI-style JSON error envelope. |
 | `dashboard_assets.rs` | rust-embed of `dashboard/`. |
 
@@ -208,11 +208,33 @@ Two independent SQLite DBs (both WAL, `synchronous=NORMAL`, std
     262144 — advertising the trained value lets a client overrun the served
     window), values outside 1024..=10_000_000 are rejected as junk, and
     `max_tokens` is never read as a window. A model whose provider reports no
-    window advertises none and is named in a startup `warn!`. There are
-    deliberately **no** config overrides, no metadata catalog and no window
-    enforcement/trimming: metadata is routed, never invented. Adding a derived
-    key here is a wire-format change — check the dashboard payload rules
-    (invariant 2) before extending it.
+    window advertises none and is named in a startup `warn!`. There is **no**
+    metadata catalog, no window enforcement/trimming, and no invented value:
+    metadata is routed, or declared by the operator (invariant 18). Adding a
+    derived key here is a wire-format change — check the dashboard payload
+    rules (invariant 2) before extending it.
+18. **`[model_properties]` is the only hand-declared metadata.** Config
+    `HashMap<model-name, ModelProperties>` (`context_length` typed, everything
+    else `#[serde(flatten)] extra: Map<String, Value>`) is overlaid on the
+    discovered map by `server::apply_model_properties` right after discovery —
+    so config wins per key, and a model is only logged as windowless when
+    neither side supplied one. **A key is the model's own name as its provider
+    calls it** (`deepseek-v4-pro`, `nemotron-3.5`), never the namespaced id
+    proxai advertises; `server::override_targets` matches a key against the
+    advertised id, the upstream id, and `model_meta::bare_model_name` (the
+    upstream id with the provider's own prefix stripped —
+    `nvidia/nemotron-3.5` -> `nemotron-3.5`), so one key covers every provider
+    offering that model. Unmatched keys and out-of-band `context_length`
+    (dropped in `Config::sanitize_model_properties` via
+    `model_meta::is_plausible_window`, the same band the derivation uses) are
+    warned about, never fatal. Keys are applied in sorted order, so two keys
+    matching one model resolve the same way on every boot.
+    `AdvertisedModel::apply_overrides` refuses `id`/`object`/`owned_by` —
+    overlaying them would emit duplicate JSON keys because `ModelEntry` owns
+    them as fields. Keys with `.` (or other TOML-special punctuation) must be
+    quoted. Overrides are advertising-only: the request path (routing,
+    forwarding, usage rows) never reads them, and the advertised ids / usage
+    rows keep their `provider/model` form.
 
 ## Change checklists
 

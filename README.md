@@ -7,6 +7,7 @@ OpenAI-compatible API proxy with multi-provider routing, key management, and a s
 - **Multi-provider routing** -- route requests to DeepSeek, Kimi, OpenAI, etc. based on model name
 - **API key auth** -- generate and manage client API keys (SHA-256 hashed, stored in SQLite)
 - **Dynamic model discovery** -- auto-discovers models from upstream providers at startup and re-advertises each one's own metadata (context window included) on `/v1/models`, so clients read the real limits instead of guessing
+- **Config-declared model metadata** -- optional `[model_properties]` table fills in (or corrects) metadata a provider fails to report, e.g. a fallback `context_length`
 - **Rate limiting** -- 20 failed auth attempts per IP in 60s returns 429
 - **Admin socket** -- abstract-namespace Unix socket RPC (`@proxai`) for key management (no API key needed)
 - **Usage tracking** -- per-key request counts persisted in SQLite
@@ -57,6 +58,26 @@ api_key = "sk-..."
 # Optional: only advertise these upstream model ids (default: all discovered).
 # Models the provider doesn't offer are skipped, not fatal.
 # models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+
+# Optional: per-model properties to advertise on /v1/models, keyed by the
+# model's own name (as its provider calls it) — not the namespaced id proxai
+# advertises. Overlaid on the provider's own metadata, config winning per key —
+# use it to supply a context window the provider never reports, or correct one
+# it reports wrong. id/object/owned_by cannot be overridden; a key containing
+# "." must be quoted.
+#
+# [model_properties]
+#
+# [model_properties.deepseek-v4-pro]
+# context_length = 1000000
+# display_name = "DeepSeek V4 Pro"
+# max_output_tokens = 65536
+#
+# [model_properties.deepseek-v4-flash]
+# context_length = 131072
+#
+# [model_properties."nemotron-3.5"]
+# context_length = 262144
 ```
 
 ## CLI
